@@ -25,11 +25,16 @@ from turnstone.api.schemas import (
     AuthLoginResponse,
     AuthSetupResponse,
     AuthStatusResponse,
+    ListScheduleRunsResponse,
+    ListSchedulesResponse,
+    ScheduleInfo,
     StatusResponse,
 )
 from turnstone.sdk._base import _BaseClient
 from turnstone.sdk._sync import _SyncRunner
 from turnstone.sdk.events import ClusterEvent
+
+_UNSET: Any = object()
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -179,6 +184,109 @@ class AsyncTurnstoneConsole(_BaseClient):
     async def health(self) -> ConsoleHealthResponse:
         return await self._request("GET", "/health", response_model=ConsoleHealthResponse)
 
+    # -- schedules -----------------------------------------------------------
+
+    async def list_schedules(self) -> ListSchedulesResponse:
+        return await self._request(
+            "GET", "/v1/api/admin/schedules", response_model=ListSchedulesResponse
+        )
+
+    async def create_schedule(
+        self,
+        *,
+        name: str,
+        schedule_type: str,
+        initial_message: str,
+        description: str = "",
+        cron_expr: str = "",
+        at_time: str = "",
+        target_mode: str = "auto",
+        model: str = "",
+        auto_approve: bool = False,
+        auto_approve_tools: list[str] | None = None,
+        enabled: bool = True,
+    ) -> ScheduleInfo:
+        body: dict[str, Any] = {
+            "name": name,
+            "schedule_type": schedule_type,
+            "initial_message": initial_message,
+            "target_mode": target_mode,
+            "auto_approve": auto_approve,
+            "enabled": enabled,
+        }
+        if description:
+            body["description"] = description
+        if cron_expr:
+            body["cron_expr"] = cron_expr
+        if at_time:
+            body["at_time"] = at_time
+        if model:
+            body["model"] = model
+        if auto_approve_tools:
+            body["auto_approve_tools"] = auto_approve_tools
+        return await self._request(
+            "POST", "/v1/api/admin/schedules", json_body=body, response_model=ScheduleInfo
+        )
+
+    async def get_schedule(self, task_id: str) -> ScheduleInfo:
+        return await self._request(
+            "GET", f"/v1/api/admin/schedules/{task_id}", response_model=ScheduleInfo
+        )
+
+    async def update_schedule(
+        self,
+        task_id: str,
+        *,
+        name: Any = _UNSET,
+        description: Any = _UNSET,
+        schedule_type: Any = _UNSET,
+        cron_expr: Any = _UNSET,
+        at_time: Any = _UNSET,
+        target_mode: Any = _UNSET,
+        model: Any = _UNSET,
+        initial_message: Any = _UNSET,
+        auto_approve: Any = _UNSET,
+        auto_approve_tools: Any = _UNSET,
+        enabled: Any = _UNSET,
+    ) -> ScheduleInfo:
+        body: dict[str, Any] = {}
+        for key, val in [
+            ("name", name),
+            ("description", description),
+            ("schedule_type", schedule_type),
+            ("cron_expr", cron_expr),
+            ("at_time", at_time),
+            ("target_mode", target_mode),
+            ("model", model),
+            ("initial_message", initial_message),
+            ("auto_approve", auto_approve),
+            ("auto_approve_tools", auto_approve_tools),
+            ("enabled", enabled),
+        ]:
+            if val is not _UNSET:
+                body[key] = val
+        return await self._request(
+            "PUT",
+            f"/v1/api/admin/schedules/{task_id}",
+            json_body=body,
+            response_model=ScheduleInfo,
+        )
+
+    async def delete_schedule(self, task_id: str) -> StatusResponse:
+        return await self._request(
+            "DELETE", f"/v1/api/admin/schedules/{task_id}", response_model=StatusResponse
+        )
+
+    async def list_schedule_runs(
+        self, task_id: str, *, limit: int = 50
+    ) -> ListScheduleRunsResponse:
+        return await self._request(
+            "GET",
+            f"/v1/api/admin/schedules/{task_id}/runs",
+            params={"limit": limit},
+            response_model=ListScheduleRunsResponse,
+        )
+
 
 class TurnstoneConsole:
     """Synchronous client for the turnstone console API.
@@ -273,6 +381,84 @@ class TurnstoneConsole:
 
     def health(self) -> ConsoleHealthResponse:
         return self._runner.run(self._async.health())
+
+    # -- schedules -----------------------------------------------------------
+
+    def list_schedules(self) -> ListSchedulesResponse:
+        return self._runner.run(self._async.list_schedules())
+
+    def create_schedule(
+        self,
+        *,
+        name: str,
+        schedule_type: str,
+        initial_message: str,
+        description: str = "",
+        cron_expr: str = "",
+        at_time: str = "",
+        target_mode: str = "auto",
+        model: str = "",
+        auto_approve: bool = False,
+        auto_approve_tools: list[str] | None = None,
+        enabled: bool = True,
+    ) -> ScheduleInfo:
+        return self._runner.run(
+            self._async.create_schedule(
+                name=name,
+                schedule_type=schedule_type,
+                initial_message=initial_message,
+                description=description,
+                cron_expr=cron_expr,
+                at_time=at_time,
+                target_mode=target_mode,
+                model=model,
+                auto_approve=auto_approve,
+                auto_approve_tools=auto_approve_tools,
+                enabled=enabled,
+            )
+        )
+
+    def get_schedule(self, task_id: str) -> ScheduleInfo:
+        return self._runner.run(self._async.get_schedule(task_id))
+
+    def update_schedule(
+        self,
+        task_id: str,
+        *,
+        name: Any = _UNSET,
+        description: Any = _UNSET,
+        schedule_type: Any = _UNSET,
+        cron_expr: Any = _UNSET,
+        at_time: Any = _UNSET,
+        target_mode: Any = _UNSET,
+        model: Any = _UNSET,
+        initial_message: Any = _UNSET,
+        auto_approve: Any = _UNSET,
+        auto_approve_tools: Any = _UNSET,
+        enabled: Any = _UNSET,
+    ) -> ScheduleInfo:
+        return self._runner.run(
+            self._async.update_schedule(
+                task_id,
+                name=name,
+                description=description,
+                schedule_type=schedule_type,
+                cron_expr=cron_expr,
+                at_time=at_time,
+                target_mode=target_mode,
+                model=model,
+                initial_message=initial_message,
+                auto_approve=auto_approve,
+                auto_approve_tools=auto_approve_tools,
+                enabled=enabled,
+            )
+        )
+
+    def delete_schedule(self, task_id: str) -> StatusResponse:
+        return self._runner.run(self._async.delete_schedule(task_id))
+
+    def list_schedule_runs(self, task_id: str, *, limit: int = 50) -> ListScheduleRunsResponse:
+        return self._runner.run(self._async.list_schedule_runs(task_id, limit=limit))
 
     # -- lifecycle -----------------------------------------------------------
 

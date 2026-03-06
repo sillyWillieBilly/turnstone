@@ -270,6 +270,77 @@ export interface ConsoleHealthResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Console API — Schedules
+// ---------------------------------------------------------------------------
+
+export interface CreateScheduleRequest {
+  name: string;
+  schedule_type: string;
+  initial_message: string;
+  description?: string;
+  cron_expr?: string;
+  at_time?: string;
+  target_mode?: string;
+  model?: string;
+  auto_approve?: boolean;
+  auto_approve_tools?: string[];
+  enabled?: boolean;
+}
+
+export interface UpdateScheduleRequest {
+  name?: string;
+  description?: string;
+  schedule_type?: string;
+  cron_expr?: string;
+  at_time?: string;
+  target_mode?: string;
+  model?: string;
+  initial_message?: string;
+  auto_approve?: boolean;
+  auto_approve_tools?: string[];
+  enabled?: boolean;
+}
+
+export interface ScheduleInfo {
+  task_id: string;
+  name: string;
+  description: string;
+  schedule_type: string;
+  cron_expr: string;
+  at_time: string;
+  target_mode: string;
+  model: string;
+  initial_message: string;
+  auto_approve: boolean;
+  auto_approve_tools: string[];
+  enabled: boolean;
+  created_by: string;
+  last_run: string | null;
+  next_run: string | null;
+  created: string;
+  updated: string;
+}
+
+export interface ListSchedulesResponse {
+  schedules: ScheduleInfo[];
+}
+
+export interface ScheduleRunInfo {
+  run_id: string;
+  task_id: string;
+  node_id: string;
+  ws_id: string;
+  correlation_id: string;
+  started: string;
+  status: string;
+  error: string;
+}
+
+export interface ListScheduleRunsResponse {
+  runs: ScheduleRunInfo[];
+}
+
+// ---------------------------------------------------------------------------
 // SDK-specific types
 // ---------------------------------------------------------------------------
 

@@ -423,6 +423,150 @@ to create the initial admin user and receive a JWT in one step. See
 
 ---
 
+## Scheduled Tasks
+
+The console includes a background **TaskScheduler** daemon that creates workstreams on a timed basis via the MQ broker. It supports cron-based recurring schedules and one-shot `at` schedules.
+
+### Architecture
+
+The scheduler runs as a daemon thread inside the console process. Every `check_interval` seconds (default 15) it:
+
+1. Acquires a distributed lock via Redis `SET NX EX` (prevents duplicate dispatch in multi-console deployments)
+2. Queries the storage backend for tasks whose `next_run <= now` and `enabled = true`
+3. Dispatches each due task as one or more `CreateWorkstreamMessage` via MQ
+4. Updates `last_run` and computes the next `next_run` (or disables one-shot `at` tasks)
+5. Releases the lock via Lua script (safe conditional delete)
+
+Run history is automatically pruned (runs older than 90 days) approximately once per hour.
+
+### Schedule Types
+
+| Type | Field | Behavior |
+|------|-------|----------|
+| `cron` | `cron_expr` | Recurring schedule using standard 5-field cron syntax. Requires `croniter`. |
+| `at` | `at_time` | One-shot: fires once at the given ISO 8601 timestamp (must include timezone), then auto-disables. |
+
+### Target Modes
+
+| Mode | Behavior |
+|------|----------|
+| `auto` | Picks the reachable node with the most available capacity |
+| `pool` | Pushes to the shared inbound queue (any bridge picks it up) |
+| `all` | Fan-out to all reachable nodes (capped at `max_fan_out`, default 20) |
+| `<node_id>` | Targets a specific node by ID |
+
+### Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `check_interval` | `15.0` | Seconds between scheduler ticks |
+| `lock_ttl` | `60` | Distributed lock TTL in seconds |
+| `max_fan_out` | `20` | Maximum nodes for `all` target mode |
+
+Dependency: `croniter` (installed with turnstone).
+
+### Schedule API
+
+All schedule endpoints require `approve` scope. Maximum 200 schedules.
+
+#### `GET /v1/api/admin/schedules`
+
+List all scheduled tasks.
+
+```json
+{
+  "schedules": [
+    {
+      "task_id": "a1b2c3d4",
+      "name": "nightly-checks",
+      "description": "Run nightly health checks",
+      "schedule_type": "cron",
+      "cron_expr": "0 2 * * *",
+      "at_time": "",
+      "target_mode": "auto",
+      "model": "",
+      "initial_message": "Run the nightly health check suite.",
+      "auto_approve": false,
+      "auto_approve_tools": [],
+      "enabled": true,
+      "created_by": "u_admin",
+      "last_run": "2026-03-05T02:00:00Z",
+      "next_run": "2026-03-06T02:00:00Z",
+      "created": "2026-03-01T12:00:00Z",
+      "updated": "2026-03-05T02:00:01Z"
+    }
+  ]
+}
+```
+
+#### `POST /v1/api/admin/schedules`
+
+Create a scheduled task.
+
+Request:
+
+```json
+{
+  "name": "nightly-checks",
+  "description": "Run nightly health checks",
+  "schedule_type": "cron",
+  "cron_expr": "0 2 * * *",
+  "target_mode": "auto",
+  "initial_message": "Run the nightly health check suite.",
+  "auto_approve": false,
+  "enabled": true
+}
+```
+
+Required fields: `name`, `schedule_type`, `initial_message`. For `cron` schedules provide `cron_expr`; for `at` schedules provide `at_time` (ISO 8601 with timezone, must be in the future).
+
+Response: `ScheduleInfo` (same shape as list items above). Returns `400` for invalid cron syntax, naive timestamps, or past `at_time`. Returns `409` if the 200-schedule cap is reached.
+
+#### `GET /v1/api/admin/schedules/{task_id}`
+
+Get a single scheduled task. Returns `ScheduleInfo` or `404`.
+
+#### `PUT /v1/api/admin/schedules/{task_id}`
+
+Partial update — only include fields to change. If `schedule_type`, `cron_expr`, or `at_time` change, `next_run` is recomputed automatically.
+
+```json
+{
+  "enabled": false
+}
+```
+
+Response: updated `ScheduleInfo`. Returns `400` for validation errors, `404` if not found.
+
+#### `DELETE /v1/api/admin/schedules/{task_id}`
+
+Delete a scheduled task and all its run history. Returns `{"status": "ok"}` or `404`.
+
+#### `GET /v1/api/admin/schedules/{task_id}/runs?limit=50`
+
+List execution history for a task (most recent first). `limit` defaults to 50, max 200.
+
+```json
+{
+  "runs": [
+    {
+      "run_id": "r_abc123",
+      "task_id": "a1b2c3d4",
+      "node_id": "db-west-04",
+      "ws_id": "ws_xyz",
+      "correlation_id": "corr_789",
+      "started": "2026-03-05T02:00:00Z",
+      "status": "dispatched",
+      "error": ""
+    }
+  ]
+}
+```
+
+Status is `dispatched` on success or `failed` with an `error` message (e.g. no reachable nodes). Failed runs do not advance `next_run`.
+
+---
+
 ## CLI Commands
 
 The `/cluster` command in the turnstone CLI queries the console's HTTP API. Requires `--console-url` or `[console] url` in config.toml.

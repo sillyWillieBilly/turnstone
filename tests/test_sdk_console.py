@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -240,3 +242,140 @@ async def test_query_params_passed():
         assert "state=running" in captured_url[0]
         assert "page=2" in captured_url[0]
         assert "per_page=25" in captured_url[0]
+
+
+# ---------------------------------------------------------------------------
+# Schedules
+# ---------------------------------------------------------------------------
+
+_SCHEDULE_FIXTURE = {
+    "task_id": "t1",
+    "name": "nightly",
+    "description": "",
+    "schedule_type": "cron",
+    "cron_expr": "0 2 * * *",
+    "at_time": "",
+    "target_mode": "auto",
+    "model": "",
+    "initial_message": "Run nightly checks",
+    "auto_approve": False,
+    "auto_approve_tools": [],
+    "enabled": True,
+    "created_by": "u1",
+    "last_run": None,
+    "next_run": "2026-03-06T02:00:00Z",
+    "created": "2026-03-05T12:00:00Z",
+    "updated": "2026-03-05T12:00:00Z",
+}
+
+
+@pytest.mark.anyio
+async def test_list_schedules():
+    transport = _mock_transport(
+        {"GET /v1/api/admin/schedules": _json_response({"schedules": [_SCHEDULE_FIXTURE]})}
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as hc:
+        client = AsyncTurnstoneConsole(httpx_client=hc)
+        resp = await client.list_schedules()
+        assert len(resp.schedules) == 1
+        assert resp.schedules[0].task_id == "t1"
+        assert resp.schedules[0].name == "nightly"
+
+
+@pytest.mark.anyio
+async def test_create_schedule():
+    captured_body: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_body.append(json.loads(request.content))
+        return _json_response(_SCHEDULE_FIXTURE)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as hc:
+        client = AsyncTurnstoneConsole(httpx_client=hc)
+        resp = await client.create_schedule(
+            name="nightly",
+            schedule_type="cron",
+            initial_message="Run nightly checks",
+            cron_expr="0 2 * * *",
+        )
+        assert resp.task_id == "t1"
+        body = captured_body[0]
+        assert body["name"] == "nightly"
+        assert body["schedule_type"] == "cron"
+        assert body["cron_expr"] == "0 2 * * *"
+        assert body["initial_message"] == "Run nightly checks"
+        # Optional fields with defaults should not appear when not set
+        assert "description" not in body
+        assert "model" not in body
+
+
+@pytest.mark.anyio
+async def test_get_schedule():
+    transport = _mock_transport(
+        {"GET /v1/api/admin/schedules/t1": _json_response(_SCHEDULE_FIXTURE)}
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as hc:
+        client = AsyncTurnstoneConsole(httpx_client=hc)
+        resp = await client.get_schedule("t1")
+        assert resp.task_id == "t1"
+        assert resp.schedule_type == "cron"
+
+
+@pytest.mark.anyio
+async def test_update_schedule_partial():
+    """Only explicitly-passed fields should appear in the request body."""
+    captured_body: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_body.append(json.loads(request.content))
+        return _json_response({**_SCHEDULE_FIXTURE, "enabled": False})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as hc:
+        client = AsyncTurnstoneConsole(httpx_client=hc)
+        resp = await client.update_schedule("t1", enabled=False)
+        assert resp.enabled is False
+        body = captured_body[0]
+        assert body == {"enabled": False}
+
+
+@pytest.mark.anyio
+async def test_delete_schedule():
+    transport = _mock_transport(
+        {"DELETE /v1/api/admin/schedules/t1": _json_response({"status": "ok"})}
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as hc:
+        client = AsyncTurnstoneConsole(httpx_client=hc)
+        resp = await client.delete_schedule("t1")
+        assert resp.status == "ok"
+
+
+@pytest.mark.anyio
+async def test_list_schedule_runs():
+    transport = _mock_transport(
+        {
+            "GET /v1/api/admin/schedules/t1/runs": _json_response(
+                {
+                    "runs": [
+                        {
+                            "run_id": "r1",
+                            "task_id": "t1",
+                            "node_id": "n1",
+                            "ws_id": "ws1",
+                            "correlation_id": "c1",
+                            "started": "2026-03-05T02:00:00Z",
+                            "status": "dispatched",
+                            "error": "",
+                        }
+                    ]
+                }
+            )
+        }
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as hc:
+        client = AsyncTurnstoneConsole(httpx_client=hc)
+        resp = await client.list_schedule_runs("t1", limit=10)
+        assert len(resp.runs) == 1
+        assert resp.runs[0].run_id == "r1"
+        assert resp.runs[0].status == "dispatched"

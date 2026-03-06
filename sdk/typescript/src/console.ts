@@ -10,9 +10,14 @@ import type {
   ConsoleCreateWsRequest,
   ConsoleCreateWsResponse,
   ConsoleHealthResponse,
+  CreateScheduleRequest,
+  ListScheduleRunsResponse,
+  ListSchedulesResponse,
   NodeDetailResponse,
   NodesOptions,
+  ScheduleInfo,
   StatusResponse,
+  UpdateScheduleRequest,
   WorkstreamsOptions,
 } from "./types.js";
 
@@ -110,5 +115,41 @@ export class TurnstoneConsole extends BaseClient {
 
   async health(): Promise<ConsoleHealthResponse> {
     return this.request("GET", "/health");
+  }
+
+  // -- Schedules ------------------------------------------------------------
+
+  async listSchedules(): Promise<ListSchedulesResponse> {
+    return this.request("GET", "/v1/api/admin/schedules");
+  }
+
+  async createSchedule(opts: CreateScheduleRequest): Promise<ScheduleInfo> {
+    return this.request("POST", "/v1/api/admin/schedules", { json: opts });
+  }
+
+  async getSchedule(taskId: string): Promise<ScheduleInfo> {
+    return this.request("GET", `/v1/api/admin/schedules/${taskId}`);
+  }
+
+  async updateSchedule(
+    taskId: string,
+    opts: UpdateScheduleRequest,
+  ): Promise<ScheduleInfo> {
+    return this.request("PUT", `/v1/api/admin/schedules/${taskId}`, {
+      json: opts,
+    });
+  }
+
+  async deleteSchedule(taskId: string): Promise<StatusResponse> {
+    return this.request("DELETE", `/v1/api/admin/schedules/${taskId}`);
+  }
+
+  async listScheduleRuns(
+    taskId: string,
+    opts?: { limit?: number },
+  ): Promise<ListScheduleRunsResponse> {
+    return this.request("GET", `/v1/api/admin/schedules/${taskId}/runs`, {
+      params: { limit: opts?.limit ?? 50 },
+    });
   }
 }

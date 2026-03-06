@@ -75,6 +75,7 @@ turnstone/
     client.py         TurnstoneClient library + TurnResult for MQ-based access
   console/
     collector.py      ClusterCollector — aggregates state from all nodes via Redis + HTTP
+    scheduler.py      TaskScheduler — background cron/at scheduler, dispatches via MQ
     server.py         Cluster dashboard HTTP server + SSE + CLI entry point
     static/           Cluster dashboard web UI (page-specific HTML, CSS, JS)
   channels/
