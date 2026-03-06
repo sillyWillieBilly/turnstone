@@ -17,3 +17,5 @@ venv/
 .plan.md
 .plan-*.md
 .hypothesis/
+PROGRESS.md
+.coverage
