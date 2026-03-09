@@ -473,11 +473,9 @@ async def events_sse(request: Request) -> Response:
     if not ws or not ui:
         return JSONResponse({"error": "Unknown workstream"}, status_code=404)
 
-    ui._sse_generation += 1
-    my_gen = ui._sse_generation
-    # Drain stale events.  A race with the worker thread is acceptable:
-    # worst case we discard one fresh event, and the client catches up
-    # via the history replay above.
+    # Drain stale events so this client starts fresh.  A race with the
+    # worker thread is acceptable: worst case we discard one fresh event,
+    # and the client catches up via the history replay below.
     while not ui._event_queue.empty():
         try:
             ui._event_queue.get_nowait()
@@ -509,7 +507,7 @@ async def events_sse(request: Request) -> Response:
         _metrics.record_sse_connect()
         try:
             loop = asyncio.get_running_loop()
-            while my_gen == ui._sse_generation:
+            while True:
                 try:
                     event = await loop.run_in_executor(
                         None, functools.partial(ui._event_queue.get, timeout=5)
@@ -517,8 +515,6 @@ async def events_sse(request: Request) -> Response:
                     yield {"data": json.dumps(event)}
                 except queue.Empty:
                     pass
-                if await request.is_disconnected():
-                    break
         finally:
             _metrics.record_sse_disconnect()
 
@@ -545,8 +541,6 @@ async def global_events_sse(request: Request) -> Response:
                     yield {"data": json.dumps(event)}
                 except queue.Empty:
                     pass
-                if await request.is_disconnected():
-                    break
         finally:
             _metrics.record_sse_disconnect()
             with listeners_lock:
