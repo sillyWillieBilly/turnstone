@@ -2548,7 +2548,20 @@ class ChatSession:
 
         turn = 0
         while max_tool_turns < 0 or turn < max_tool_turns:
-            result = _api_call(agent_messages)
+            try:
+                result = _api_call(agent_messages)
+            except Exception as e:
+                # Context-exceeded or other non-retryable API error.
+                # Return what we have so far rather than crashing.
+                err_str = str(e).lower()
+                if "context" in err_str or "token" in err_str:
+                    self.ui.on_info(f"[{label}] context limit reached, stopping early")
+                    # Find the last assistant content we have
+                    for msg in reversed(agent_messages):
+                        if msg.get("role") == "assistant" and msg.get("content"):
+                            return msg["content"]
+                    return f"({label} stopped: context limit exceeded)"
+                raise
 
             # Handle truncation or content filter — stop agent early
             if result.finish_reason == "length":
@@ -2611,6 +2624,12 @@ class ChatSession:
                             _, output = prepared["execute"](prepared)
                     else:
                         output = f"Unknown tool: {tool_name}"
+
+                # Truncate large tool outputs to avoid blowing context limits.
+                # Agents operate autonomously; they can refine their queries
+                # if truncation loses important detail.
+                if isinstance(output, str) and len(output) > 16000:
+                    output = output[:16000] + f"\n\n... (truncated from {len(output)} chars)"
 
                 agent_messages.append(
                     {
