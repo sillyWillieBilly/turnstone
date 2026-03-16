@@ -1892,6 +1892,8 @@
 
 .admin-action-btn-ghost{background:transparent;color:var(--fg-dim);border:1px solid var(--border-strong)}
 .admin-action-btn-ghost:hover{color:var(--fg);background:var(--bg-highlight)}
+.mcp-sync-pending{color:var(--yellow)!important;border-color:var(--yellow)!important;animation:mcp-sync-pulse 2s ease-in-out infinite}
+@keyframes mcp-sync-pulse{0%,100%{border-color:var(--yellow)}50%{border-color:rgba(251,191,36,.3)}}
 
 /* -- MCP sub-view toggle -------------------------------------------------- */
 .mcp-view-toggle{display:flex;gap:2px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);overflow:hidden}
@@ -2081,4 +2083,5 @@
   .mcp-view-btn, .mcp-reg-card, .mcp-install-btn, .mcp-install-source-label { transition: none; }
   .mcp-registry-search input[type="search"] { transition: none; }
   .mcp-reg-card-repo { transition: none; }
+  .mcp-sync-pending { animation: none; }
 }

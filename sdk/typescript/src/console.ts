@@ -471,7 +471,7 @@ export class TurnstoneConsole extends BaseClient {
     cursor?: string;
   }): Promise<RegistrySearchResponse> {
     const params: Record<string, string> = {};
-    if (opts?.q) params.q = opts.q;
+    if (opts?.q) params.search = opts.q;
     if (opts?.limit) params.limit = String(opts.limit);
     if (opts?.cursor) params.cursor = opts.cursor;
     return this.request("GET", "/v1/api/admin/mcp-registry/search", {

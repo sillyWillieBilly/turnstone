@@ -2836,6 +2836,7 @@ function _renderMcpServers(items) {
             })
             .then(function () {
               showToast("Server deleted");
+              _flagMcpSyncPending();
               loadAdminMcp();
             })
             .catch(function () {
@@ -3021,6 +3022,7 @@ function submitCreateMcp() {
     .then(function () {
       hideCreateMcpModal();
       showToast(editId ? "Server updated" : "Server created");
+      _flagMcpSyncPending();
       loadAdminMcp();
     })
     .catch(function (e) {
@@ -3031,6 +3033,16 @@ function submitCreateMcp() {
     .finally(function () {
       document.getElementById("mcp-create-submit").disabled = false;
     });
+}
+
+function _flagMcpSyncPending() {
+  var btn = document.getElementById("mcp-sync-btn");
+  if (btn) btn.classList.add("mcp-sync-pending");
+}
+
+function _clearMcpSyncPending() {
+  var btn = document.getElementById("mcp-sync-btn");
+  if (btn) btn.classList.remove("mcp-sync-pending");
 }
 
 function reloadMcpNodes() {
@@ -3053,6 +3065,7 @@ function reloadMcpNodes() {
       if (totalAdded) msg += ", +" + totalAdded + " added";
       if (totalRemoved) msg += ", -" + totalRemoved + " removed";
       showToast(msg);
+      _clearMcpSyncPending();
       setTimeout(loadAdminMcp, 1500);
     })
     .catch(function () {
@@ -3132,11 +3145,11 @@ function _openMcpDetail(s) {
           escapeHtml(meta.description) +
           "</p>";
       }
-      if (meta.website_url) {
+      if (meta.website_url && /^https?:\/\//i.test(meta.website_url)) {
         html +=
           '<p style="font-size:12px"><a href="' +
           escapeHtml(meta.website_url) +
-          '" target="_blank" rel="noopener" style="color:var(--magenta)">' +
+          '" target="_blank" rel="noopener noreferrer" style="color:var(--magenta)">' +
           escapeHtml(meta.website_url) +
           "</a></p>";
       }
@@ -3253,6 +3266,7 @@ function submitImportMcp() {
       if ((data.errors || []).length)
         msg += ", " + data.errors.length + " error(s)";
       showToast(msg);
+      if ((data.imported || []).length) _flagMcpSyncPending();
       loadAdminMcp();
     })
     .catch(function (e) {
@@ -3274,6 +3288,7 @@ function switchMcpView(view) {
     var isActive = btns[i].getAttribute("data-mcp-view") === view;
     btns[i].classList.toggle("active", isActive);
     btns[i].setAttribute("aria-selected", isActive ? "true" : "false");
+    btns[i].setAttribute("tabindex", isActive ? "0" : "-1");
   }
   document.getElementById("mcp-view-servers").style.display =
     view === "servers" ? "" : "none";
@@ -3299,7 +3314,7 @@ function searchMcpRegistry(append) {
     if (filterEl) filterEl.value = "";
   }
   var url = "/v1/api/admin/mcp-registry/search?limit=20";
-  if (_registryQuery) url += "&q=" + encodeURIComponent(_registryQuery);
+  if (_registryQuery) url += "&search=" + encodeURIComponent(_registryQuery);
   if (append && _registryCursor)
     url += "&cursor=" + encodeURIComponent(_registryCursor);
 
@@ -3411,7 +3426,7 @@ function _renderRegistryResults() {
     // Repo link for trust signal
     var repoLink = "";
     var repoUrl = (srv.repository || {}).url || "";
-    if (repoUrl) {
+    if (repoUrl && /^https?:\/\//i.test(repoUrl)) {
       repoLink =
         ' <a href="' +
         escapeHtml(repoUrl) +

@@ -774,7 +774,7 @@ class AsyncTurnstoneConsole(_BaseClient):
         """Search the MCP Registry for available servers."""
         params: dict[str, Any] = {}
         if q:
-            params["q"] = q
+            params["search"] = q
         if limit != 20:
             params["limit"] = limit
         if cursor:

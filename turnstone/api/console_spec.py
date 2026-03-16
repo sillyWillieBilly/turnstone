@@ -724,7 +724,7 @@ CONSOLE_ENDPOINTS: list[EndpointSpec] = [
         "Search the MCP Registry for available servers",
         response_model=RegistrySearchResponse,
         query_params=[
-            QueryParam("q", "Search query"),
+            QueryParam("search", "Search query"),
             QueryParam("limit", "Max results (default 20, max 100)", schema_type="integer"),
             QueryParam("cursor", "Pagination cursor for next page"),
         ],

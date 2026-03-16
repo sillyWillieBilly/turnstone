@@ -3175,7 +3175,7 @@ async def admin_registry_search(request: Request) -> JSONResponse:
     if err:
         return err
 
-    q = str(request.query_params.get("q", "")).strip()
+    q = str(request.query_params.get("search", "")).strip()
     try:
         limit = min(int(request.query_params.get("limit", "20")), 100)
     except (ValueError, TypeError):
@@ -3274,6 +3274,12 @@ async def admin_registry_install(request: Request) -> JSONResponse:
     variables = body.get("variables") or {}
     env_values = body.get("env") or {}
     header_values = body.get("headers") or {}
+    if not isinstance(variables, dict):
+        return JSONResponse({"error": "variables must be an object"}, status_code=400)
+    if not isinstance(env_values, dict):
+        return JSONResponse({"error": "env must be an object"}, status_code=400)
+    if not isinstance(header_values, dict):
+        return JSONResponse({"error": "headers must be an object"}, status_code=400)
     custom_name = str(body.get("name", "")).strip()
 
     # Check for duplicates

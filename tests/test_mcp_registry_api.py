@@ -187,7 +187,7 @@ class TestRegistrySearch:
             instance.__aexit__ = AsyncMock(return_value=False)
             mock_client.return_value = instance
 
-            resp = client.get("/v1/api/admin/mcp-registry/search?q=test")
+            resp = client.get("/v1/api/admin/mcp-registry/search?search=test")
 
         assert resp.status_code == 200
         data = resp.json()
@@ -218,7 +218,7 @@ class TestRegistrySearch:
             instance.__aexit__ = AsyncMock(return_value=False)
             mock_client.return_value = instance
 
-            resp = client.get("/v1/api/admin/mcp-registry/search?q=test")
+            resp = client.get("/v1/api/admin/mcp-registry/search?search=test")
 
         data = resp.json()
         s = data["servers"][0]
@@ -238,7 +238,7 @@ class TestRegistrySearch:
             instance.__aexit__ = AsyncMock(return_value=False)
             mock_client.return_value = instance
 
-            resp = client.get("/v1/api/admin/mcp-registry/search?q=test")
+            resp = client.get("/v1/api/admin/mcp-registry/search?search=test")
 
         assert resp.status_code == 502
         assert "Registry error" in resp.json()["error"]
@@ -253,7 +253,7 @@ class TestRegistrySearch:
             instance.__aexit__ = AsyncMock(return_value=False)
             mock_client.return_value = instance
 
-            resp = client.get("/v1/api/admin/mcp-registry/search?q=test&limit=5&cursor=prev")
+            resp = client.get("/v1/api/admin/mcp-registry/search?search=test&limit=5&cursor=prev")
 
         assert resp.status_code == 200
         assert resp.json()["next_cursor"] == "cursor123"

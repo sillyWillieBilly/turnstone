@@ -398,11 +398,11 @@
       <div class="admin-toolbar">
         <span class="section-header">MCP</span>
         <div class="mcp-view-toggle" role="tablist" aria-label="MCP view">
-          <button class="mcp-view-btn active" data-mcp-view="servers" role="tab" aria-selected="true" aria-controls="mcp-view-servers" onclick="switchMcpView('servers')">Servers</button>
-          <button class="mcp-view-btn" data-mcp-view="registry" role="tab" aria-selected="false" aria-controls="mcp-view-registry" onclick="switchMcpView('registry')">Registry</button>
+          <button class="mcp-view-btn active" data-mcp-view="servers" role="tab" aria-selected="true" aria-controls="mcp-view-servers" tabindex="0" onclick="switchMcpView('servers')">Servers</button>
+          <button class="mcp-view-btn" data-mcp-view="registry" role="tab" aria-selected="false" aria-controls="mcp-view-registry" tabindex="-1" onclick="switchMcpView('registry')">Registry</button>
         </div>
         <span id="mcp-servers-toolbar">
-          <button class="admin-action-btn admin-action-btn-ghost" onclick="reloadMcpNodes()" title="Push MCP server config to all cluster nodes and reconnect">Sync to Nodes</button>
+          <button id="mcp-sync-btn" class="admin-action-btn admin-action-btn-ghost" onclick="reloadMcpNodes()" title="Push MCP server config to all cluster nodes and reconnect">Sync to Nodes</button>
           <button class="admin-action-btn admin-action-btn-ghost" onclick="showImportMcpModal()">Import JSON</button>
           <button class="admin-action-btn" onclick="showCreateMcpModal()">+ Add Server</button>
         </span>

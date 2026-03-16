@@ -1482,7 +1482,7 @@ Search the official MCP Registry for available servers. Permission: `admin.mcp`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `q` | string | `""` | Search query. Empty returns a browsable listing. |
+| `search` | string | `""` | Search query. Empty returns a browsable listing. |
 | `limit` | integer | `20` | Results per page (max 100). |
 | `cursor` | string | — | Opaque cursor for pagination. |
 
