@@ -63,7 +63,7 @@ class DuckDuckGoClient:
         self._timeout = timeout
 
     def search(self, query: str, max_results: int = 5, **kwargs: Any) -> str:
-        from ddgs import DDGS  # type: ignore[import-not-found]
+        from ddgs import DDGS
 
         with DDGS(timeout=int(self._timeout)) as ddgs:
             raw = list(ddgs.text(query, max_results=max_results))
