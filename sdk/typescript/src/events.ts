@@ -38,6 +38,11 @@ export interface StreamEndEvent {
   type: "stream_end";
 }
 
+export interface StateChangeEvent {
+  type: "state_change";
+  state: "idle" | "thinking" | "running" | "attention" | "error";
+}
+
 export interface ToolInfoEvent {
   type: "tool_info";
   items: Array<Record<string, unknown>>;
@@ -150,6 +155,7 @@ export type ServerEvent =
   | ContentEvent
   | ReasoningEvent
   | StreamEndEvent
+  | StateChangeEvent
   | ToolInfoEvent
   | ApproveRequestEvent
   | ApprovalResolvedEvent
@@ -245,6 +251,10 @@ export function isErrorEvent(e: ServerEvent): e is ErrorEvent {
 
 export function isStreamEndEvent(e: ServerEvent): e is StreamEndEvent {
   return e.type === "stream_end";
+}
+
+export function isStateChangeEvent(e: ServerEvent): e is StateChangeEvent {
+  return e.type === "state_change";
 }
 
 export function isToolResultEvent(e: ServerEvent): e is ToolResultEvent {

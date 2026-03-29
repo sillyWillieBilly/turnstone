@@ -259,7 +259,7 @@ class SessionUI(Protocol):
 | Class | Module | Notes |
 |-------|--------|-------|
 | `TerminalUI` | `turnstone.cli` | ANSI colors, `MarkdownRenderer`, `Spinner`, readline-based `input()` for approval |
-| `WebUI` | `turnstone.server` | SSE event queue per workstream, `threading.Event` for blocking on approval/plan |
+| `WebUI` | `turnstone.server` | SSE event queue per workstream + global broadcast, `threading.Event` for blocking on approval/plan. `on_state_change` sends to both per-workstream and global SSE (the browser UI uses per-workstream `state_change` events to manage busy/idle transitions; `stream_end` only finalizes markdown rendering). |
 | `NullUI` | `turnstone.eval` | Discards all output; `approve_tools` always returns `(True, None)` |
 
 ### WorkstreamTerminalUI

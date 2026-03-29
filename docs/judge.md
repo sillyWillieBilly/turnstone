@@ -338,7 +338,7 @@ from the output before it enters the conversation.
 | Priority | Category | Risk | Examples |
 |----------|----------|------|----------|
 | 1 | Prompt injection | high | Override phrases, role injection (`{"role":"system"}`), instruction override markers |
-| 2 | Credential leakage | high | API keys, private key blocks, connection strings, `.env` format secrets |
+| 2 | Credential leakage | high | API keys, private key blocks, connection strings, `.env` format secrets, JSON secrets (`"api_key": "..."`, `"password": "..."`, etc.) |
 | 3 | Encoded payloads | medium | Script data URIs, hex shellcode sequences |
 | 4 | Adversarial URLs | medium | Cloud metadata endpoints, credential-bearing query parameters |
 | 5 | System info disclosure | low | Private IP addresses, sensitive file paths |
