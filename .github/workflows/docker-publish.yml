@@ -1,0 +1,75 @@
+name: Publish Docker Image
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  docker:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          TAG=$(git tag --points-at HEAD | grep '^v' | head -1)
+          if [ -z "$TAG" ]; then
+            echo "No v* tag at HEAD — skipping publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: steps.tag.outputs.skip == 'false'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute Docker tags
+        if: steps.tag.outputs.skip == 'false'
+        id: tags
+        env:
+          REF: ${{ steps.tag.outputs.tag }}
+        run: |
+          VERSION="${REF#v}"
+          FULL="${REGISTRY}/${IMAGE_NAME}"
+          FULL="${FULL,,}"
+
+          if echo "$VERSION" | grep -qE '(a|b|rc)[0-9]+$'; then
+            TAGS="${FULL}:${VERSION},${FULL}:experimental"
+          else
+            MINOR="${VERSION%.*}"
+            TAGS="${FULL}:${VERSION},${FULL}:${MINOR},${FULL}:stable,${FULL}:latest"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+        if: steps.tag.outputs.skip == 'false'
+
+      - name: Build and push
+        if: steps.tag.outputs.skip == 'false'
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
