@@ -208,6 +208,18 @@ def _build_registry() -> dict[str, SettingDef]:
             max_value=50,
         ),
         SettingDef(
+            "tools.tavily_api_key",
+            "str",
+            "",
+            "Tavily API key for web search (write-only)",
+            "tools",
+            is_secret=True,
+            help="API key for the Tavily web search service. When set, enables the Tavily "
+            "backend for web_search tool calls (higher quality than DuckDuckGo). "
+            "Overrides $TAVILY_API_KEY and config.toml [api] tavily_key.",
+            reference_url="https://tavily.com",
+        ),
+        SettingDef(
             "tools.web_search_backend",
             "str",
             "",

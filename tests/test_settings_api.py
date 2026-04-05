@@ -230,7 +230,7 @@ class TestSettingsSchema:
     def test_secret_flag(self, client):
         r = client.get("/v1/api/admin/settings/schema")
         by_key = {s["key"]: s for s in r.json()["schema"]}
-        assert by_key["judge.api_key"]["is_secret"] is True
+        assert by_key["tools.tavily_api_key"]["is_secret"] is True
         assert by_key["tools.timeout"]["is_secret"] is False
 
 
@@ -244,7 +244,7 @@ class TestSecretMasking:
         from turnstone.core.settings_registry import serialize_value
 
         storage.upsert_system_setting(
-            key="judge.api_key",
+            key="tools.tavily_api_key",
             value=serialize_value("sk-real-secret"),
             node_id="",
             is_secret=True,
@@ -252,12 +252,12 @@ class TestSecretMasking:
         )
         r = client.get("/v1/api/admin/settings")
         by_key = {s["key"]: s for s in r.json()["settings"]}
-        assert by_key["judge.api_key"]["value"] == "***"
+        assert by_key["tools.tavily_api_key"]["value"] == "***"
 
     def test_secret_writable_via_api(self, client):
         """Secret settings can be written via API (write-only pattern)."""
         r = client.put(
-            "/v1/api/admin/settings/judge.api_key",
+            "/v1/api/admin/settings/tools.tavily_api_key",
             json={"value": "sk-secret-123"},
         )
         assert r.status_code == 200
@@ -268,19 +268,19 @@ class TestSecretMasking:
         """Submitting '***' for a secret setting is a no-op (preserve existing)."""
         # First write a real value
         r1 = client.put(
-            "/v1/api/admin/settings/judge.api_key",
+            "/v1/api/admin/settings/tools.tavily_api_key",
             json={"value": "sk-real-key"},
         )
         assert r1.status_code == 200
         # Now submit the sentinel — should return unchanged with full response shape
         r2 = client.put(
-            "/v1/api/admin/settings/judge.api_key",
+            "/v1/api/admin/settings/tools.tavily_api_key",
             json={"value": "***"},
         )
         assert r2.status_code == 200
         data = r2.json()
         assert data.get("unchanged") is True
-        assert data["key"] == "judge.api_key"
+        assert data["key"] == "tools.tavily_api_key"
         assert data["value"] == "***"
         assert data["type"] == "str"
         assert data["is_secret"] is True
@@ -288,12 +288,12 @@ class TestSecretMasking:
     def test_secret_still_masked_in_list(self, client):
         """After writing a secret, list still shows '***'."""
         client.put(
-            "/v1/api/admin/settings/judge.api_key",
+            "/v1/api/admin/settings/tools.tavily_api_key",
             json={"value": "sk-written-via-api"},
         )
         r = client.get("/v1/api/admin/settings")
         by_key = {s["key"]: s for s in r.json()["settings"]}
-        assert by_key["judge.api_key"]["value"] == "***"
+        assert by_key["tools.tavily_api_key"]["value"] == "***"
 
 
 # ---------------------------------------------------------------------------

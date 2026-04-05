@@ -501,9 +501,19 @@ class ChatSession:
         """Return a web search client for the configured backend, or None."""
         from turnstone.core.web_search import resolve_web_search_client
 
+        # ConfigStore (DB) takes precedence over config.toml / env var
+        tavily_key: str | None = None
+        cs = getattr(self, "_config_store", None)
+        if cs is not None:
+            db_key = cs.get("tools.tavily_api_key")
+            if db_key:
+                tavily_key = str(db_key)
+        if not tavily_key:
+            tavily_key = get_tavily_key()
+
         return resolve_web_search_client(
             backend=self._get_web_search_backend(),
-            tavily_key=get_tavily_key(),
+            tavily_key=tavily_key,
             mcp_client=self._mcp_client,
             timeout=self.tool_timeout,
         )
