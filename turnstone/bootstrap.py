@@ -105,7 +105,7 @@ Generate with: `python -c "import secrets; print(secrets.token_hex(32))"`
 
 ### Docker Image
 - `TURNSTONE_IMAGE_TAG` — Docker image tag (default: `latest`). \
-Set this to pin the image version (e.g., `1.1.0a3`, `stable`, `experimental`).
+Set this to pin the image version (e.g., `1.1.0`, `stable`, `experimental`).
 
 ### MCP Integration (optional)
 - `MCP_CONFIG` — Path to MCP server config inside the container. \
