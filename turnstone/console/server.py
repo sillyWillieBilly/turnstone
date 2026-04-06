@@ -5637,6 +5637,10 @@ async def admin_model_reload(request: Request) -> JSONResponse:
     if err:
         return err
 
+    # Ensure config (including model.default_alias) is fresh on all nodes
+    # before they rebuild their model registries.
+    await _publish_config_change(request)
+
     results = await _notify_nodes_model_reload(request)
     return JSONResponse({"status": "ok", "results": results})
 

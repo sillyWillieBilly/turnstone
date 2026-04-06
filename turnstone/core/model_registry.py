@@ -321,7 +321,7 @@ def load_model_registry(
             default_alias = "default"
         else:
             default_alias = next(iter(configs))
-            log.info(
+            log.debug(
                 "No '%s' model alias; using '%s' as default",
                 model_section.get("default", "default"),
                 default_alias,

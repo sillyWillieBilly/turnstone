@@ -2689,9 +2689,15 @@ def internal_model_reload(request: Request) -> JSONResponse:
     effective_default = new_registry.default
     cs = getattr(request.app.state, "config_store", None)
     if cs:
+        cs.reload()  # Ensure latest settings from DB
         cs_alias = cs.get("model.default_alias")
         if cs_alias and cs_alias in new_registry.models:
             effective_default = cs_alias
+            log.info(
+                "ConfigStore override: using '%s' as default model (registry had '%s')",
+                effective_default,
+                new_registry.default,
+            )
 
     try:
         registry.reload(
