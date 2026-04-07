@@ -1893,6 +1893,9 @@ class ChatSession:
                     if not self._title_generated:
                         self._title_generated = True
                         threading.Thread(target=self._generate_title, daemon=True).start()
+                    # Flush any queued messages that weren't injected
+                    # (no tool calls → no advisory seam to inject at).
+                    self._flush_queued_messages()
                     self._emit_state("idle")
                     # Dispatch any pending watch results (chains into
                     # a new send() within the same worker thread).
