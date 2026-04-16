@@ -394,3 +394,148 @@ class TestParametrizedKind:
         assert len(rows) == 1
         assert rows[0]["content"] == payload
         assert rows[0]["kind"] == kind
+
+
+class TestSweepOrphanReservations:
+    """Defensive sweep for reservations leaked by process crashes between
+    reserve_attachments and consume/unreserve."""
+
+    def _backdate(self, backend, attachment_id, *, created_ago=None, reserved_ago=None):
+        """Rewrite the row's `created` and/or `reserved_at` columns so the
+        sweep sees them as older than they really are.
+
+        Works against the same string format the storage layer writes
+        (ISO-8601 truncated to seconds).
+        """
+        from datetime import UTC, datetime, timedelta
+
+        import sqlalchemy as sa
+
+        from turnstone.core.storage._schema import workstream_attachments
+
+        values: dict[str, str] = {}
+        if created_ago is not None:
+            values["created"] = (datetime.now(UTC) - timedelta(seconds=created_ago)).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+        if reserved_ago is not None:
+            values["reserved_at"] = (datetime.now(UTC) - timedelta(seconds=reserved_ago)).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+        if not values:
+            return
+        with backend._conn() as conn:
+            conn.execute(
+                sa.update(workstream_attachments)
+                .where(workstream_attachments.c.attachment_id == attachment_id)
+                .values(**values)
+            )
+            conn.commit()
+
+    def test_clears_old_reserved_rows(self, backend):
+        backend.register_workstream("ws-sw")
+        aid = _aid()
+        backend.save_attachment(aid, "ws-sw", "u", "a.txt", "text/plain", 5, "text", b"hello")
+        reserved = backend.reserve_attachments([aid], "send-old", "ws-sw", "u")
+        assert reserved == [aid]
+        # Backdate the reservation timestamp so the sweep considers it stale
+        self._backdate(backend, aid, reserved_ago=7200)
+
+        n = backend.sweep_orphan_reservations(older_than_seconds=3600)
+        assert n == 1
+
+        # The row is back in pending — list_pending_attachments will surface it
+        pending = backend.list_pending_attachments("ws-sw", "u")
+        assert any(p["attachment_id"] == aid for p in pending)
+
+    def test_leaves_fresh_reservations_alone(self, backend):
+        backend.register_workstream("ws-sw2")
+        aid = _aid()
+        backend.save_attachment(aid, "ws-sw2", "u", "a.txt", "text/plain", 5, "text", b"hello")
+        backend.reserve_attachments([aid], "send-fresh", "ws-sw2", "u")
+        # No backdating — reservation was just created
+
+        n = backend.sweep_orphan_reservations(older_than_seconds=3600)
+        assert n == 0
+
+        # Reservation still held
+        pending = backend.list_pending_attachments("ws-sw2", "u")
+        assert pending == []
+
+    def test_old_upload_with_fresh_reservation_is_preserved(self, backend):
+        """Regression: an attachment uploaded long ago but reserved just
+        now must NOT be swept.  ``reserved_at`` (set on reserve) is the
+        staleness signal — not ``created`` (upload time)."""
+        backend.register_workstream("ws-sw-mix")
+        aid = _aid()
+        backend.save_attachment(aid, "ws-sw-mix", "u", "a.txt", "text/plain", 5, "text", b"hello")
+        # Backdate the upload by a day, but reserve fresh.
+        self._backdate(backend, aid, created_ago=86_400)
+        reserved = backend.reserve_attachments([aid], "send-fresh", "ws-sw-mix", "u")
+        assert reserved == [aid]
+
+        n = backend.sweep_orphan_reservations(older_than_seconds=3600)
+        assert n == 0
+
+        # Reservation still held — pending list is empty
+        assert backend.list_pending_attachments("ws-sw-mix", "u") == []
+        # And consume against the original send_id still succeeds
+        msg_id = backend.save_message("ws-sw-mix", "user", "after fresh reserve")
+        backend.mark_attachments_consumed(
+            [aid], msg_id, "ws-sw-mix", "u", reserved_for_msg_id="send-fresh"
+        )
+        row = backend.get_attachment(aid)
+        assert row is not None
+        assert row["message_id"] == msg_id
+
+    def test_consume_clears_reserved_at(self, backend):
+        """Once consumed, the row's reservation metadata must be wiped so
+        a follow-up sweep can't accidentally match on it."""
+        backend.register_workstream("ws-sw-consume")
+        aid = _aid()
+        backend.save_attachment(
+            aid, "ws-sw-consume", "u", "a.txt", "text/plain", 5, "text", b"hello"
+        )
+        backend.reserve_attachments([aid], "send-c", "ws-sw-consume", "u")
+        msg_id = backend.save_message("ws-sw-consume", "user", "consumed")
+        backend.mark_attachments_consumed(
+            [aid], msg_id, "ws-sw-consume", "u", reserved_for_msg_id="send-c"
+        )
+        row = backend.get_attachment(aid)
+        assert row is not None
+        assert row["reserved_at"] is None
+        assert row["reserved_for_msg_id"] is None
+
+    def test_unreserve_clears_reserved_at(self, backend):
+        backend.register_workstream("ws-sw-unres")
+        aid = _aid()
+        backend.save_attachment(aid, "ws-sw-unres", "u", "a.txt", "text/plain", 5, "text", b"hello")
+        backend.reserve_attachments([aid], "send-u", "ws-sw-unres", "u")
+        backend.unreserve_attachments("send-u", "ws-sw-unres", "u")
+        row = backend.get_attachment(aid)
+        assert row is not None
+        assert row["reserved_at"] is None
+        assert row["reserved_for_msg_id"] is None
+
+    def test_skips_consumed_rows(self, backend):
+        backend.register_workstream("ws-sw3")
+        aid = _aid()
+        backend.save_attachment(aid, "ws-sw3", "u", "a.txt", "text/plain", 5, "text", b"hello")
+        backend.reserve_attachments([aid], "send-c", "ws-sw3", "u")
+        msg_id = backend.save_message("ws-sw3", "user", "consumed turn")
+        backend.mark_attachments_consumed(
+            [aid], msg_id, "ws-sw3", "u", reserved_for_msg_id="send-c"
+        )
+        # Even backdating both timestamps shouldn't matter — the sweep
+        # excludes consumed rows.
+        self._backdate(backend, aid, created_ago=7200, reserved_ago=7200)
+
+        n = backend.sweep_orphan_reservations(older_than_seconds=3600)
+        assert n == 0
+
+    def test_zero_threshold_is_noop(self, backend):
+        # Defensive guard against accidental "sweep everything" calls
+        n = backend.sweep_orphan_reservations(older_than_seconds=0)
+        assert n == 0
+        n = backend.sweep_orphan_reservations(older_than_seconds=-5)
+        assert n == 0

@@ -76,6 +76,14 @@ _VALID_WS_ID = re.compile(r"^[0-9a-f]{32}$")
 
 _MAX_TURN_CONTENT_CHARS = 256 * 1024  # cap piggybacked content on idle events
 
+# Orphan-attachment-reservation sweep cadence.  Threshold is measured
+# against the storage layer's `reserved_at` column (time the row last
+# transitioned into reserved state, NOT upload time), so a 1-hour cap
+# is safely longer than any realistic single send without risking the
+# unreservation of attachments uploaded long ago but reserved fresh.
+_ORPHAN_SWEEP_INTERVAL_S = 30 * 60
+_ORPHAN_SWEEP_THRESHOLD_S = 1 * 3600
+
 
 class WebUI:
     """Browser-based UI using SSE for streaming and HTTP POST for actions.
@@ -3935,6 +3943,37 @@ async def _lifespan(app: Starlette) -> AsyncGenerator[None, None]:
     # Start watch runner (periodic command polling)
     if app.state.watch_runner:
         app.state.watch_runner.start()
+
+    # Sweep stale attachment reservations left over from process crashes
+    # between reserve_attachments and consume/unreserve.  Run once at
+    # startup (catches anything orphaned by the previous process), then
+    # periodically as defense-in-depth.
+    from turnstone.core.memory import sweep_orphan_reservations as _sweep_orphans
+
+    try:
+        n = await asyncio.to_thread(_sweep_orphans, _ORPHAN_SWEEP_THRESHOLD_S)
+        if n:
+            log.info("attachments.orphan_sweep.startup", swept=n)
+    except Exception:
+        log.warning("attachments.orphan_sweep.startup_failed", exc_info=True)
+
+    _orphan_sweep_stop = asyncio.Event()
+
+    async def _orphan_sweep_loop() -> None:
+        while not _orphan_sweep_stop.is_set():
+            try:
+                await asyncio.wait_for(_orphan_sweep_stop.wait(), timeout=_ORPHAN_SWEEP_INTERVAL_S)
+                return  # stop event fired
+            except TimeoutError:
+                pass
+            try:
+                n = await asyncio.to_thread(_sweep_orphans, _ORPHAN_SWEEP_THRESHOLD_S)
+                if n:
+                    log.info("attachments.orphan_sweep.periodic", swept=n)
+            except Exception:
+                log.warning("attachments.orphan_sweep.periodic_failed", exc_info=True)
+
+    _orphan_sweep_task = asyncio.create_task(_orphan_sweep_loop())
     # OIDC discovery (if configured)
     oidc_config = app.state.oidc_config
     if oidc_config.enabled:
@@ -4042,6 +4081,10 @@ async def _lifespan(app: Starlette) -> AsyncGenerator[None, None]:
         await tls_client.stop_renewal()
     if app.state.watch_runner:
         app.state.watch_runner.stop()
+    # Stop the orphan-reservation sweep loop
+    _orphan_sweep_stop.set()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await _orphan_sweep_task
     # health_registry is stateless (no background threads) — nothing to stop
     if app.state.mcp_client:
         app.state.mcp_client.shutdown()

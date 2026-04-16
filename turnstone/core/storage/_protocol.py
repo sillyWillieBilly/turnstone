@@ -148,6 +148,22 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def sweep_orphan_reservations(self, older_than_seconds: int) -> int:
+        """Clear ``reserved_for_msg_id`` on stale reservations.
+
+        Targets rows with ``reserved_for_msg_id IS NOT NULL`` AND
+        ``message_id IS NULL`` AND ``reserved_at`` older than the cutoff.
+        Self-heals reservations leaked by process crashes between
+        ``reserve_attachments`` and ``mark_attachments_consumed`` /
+        ``unreserve_attachments``.
+
+        Uses ``reserved_at`` (set on reserve, cleared on consume /
+        unreserve) rather than ``created`` (upload time) so an attachment
+        that sat pending for hours before being reserved is not
+        mistakenly unreserved mid-send.  Returns the row count swept.
+        """
+        ...
+
     def load_attachments_for_messages(self, ws_id: str) -> dict[int, list[dict[str, Any]]]:
         """Return attachments grouped by ``message_id`` for history replay.
 

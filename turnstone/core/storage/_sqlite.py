@@ -764,7 +764,11 @@ class SQLiteBackend:
             conn.execute(
                 sa.update(workstream_attachments)
                 .where(predicate)
-                .values(message_id=message_id, reserved_for_msg_id=None)
+                .values(
+                    message_id=message_id,
+                    reserved_for_msg_id=None,
+                    reserved_at=None,
+                )
             )
             conn.commit()
 
@@ -777,6 +781,7 @@ class SQLiteBackend:
     ) -> list[str]:
         if not attachment_ids or not queue_msg_id:
             return []
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
         with self._conn() as conn:
             conn.execute(
                 sa.update(workstream_attachments)
@@ -789,7 +794,7 @@ class SQLiteBackend:
                         workstream_attachments.c.reserved_for_msg_id.is_(None),
                     )
                 )
-                .values(reserved_for_msg_id=queue_msg_id)
+                .values(reserved_for_msg_id=queue_msg_id, reserved_at=now)
             )
             # Echo back which ids are now reserved for this msg id (race-
             # safe confirmation for the caller).
@@ -819,9 +824,31 @@ class SQLiteBackend:
                         workstream_attachments.c.reserved_for_msg_id == queue_msg_id,
                     )
                 )
-                .values(reserved_for_msg_id=None)
+                .values(reserved_for_msg_id=None, reserved_at=None)
             )
             conn.commit()
+
+    def sweep_orphan_reservations(self, older_than_seconds: int) -> int:
+        if older_than_seconds <= 0:
+            return 0
+        cutoff = (datetime.now(UTC) - timedelta(seconds=older_than_seconds)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+        with self._conn() as conn:
+            result = conn.execute(
+                sa.update(workstream_attachments)
+                .where(
+                    sa.and_(
+                        workstream_attachments.c.reserved_for_msg_id.is_not(None),
+                        workstream_attachments.c.message_id.is_(None),
+                        workstream_attachments.c.reserved_at.is_not(None),
+                        workstream_attachments.c.reserved_at < cutoff,
+                    )
+                )
+                .values(reserved_for_msg_id=None, reserved_at=None)
+            )
+            conn.commit()
+            return int(result.rowcount or 0)
 
     def load_attachments_for_messages(self, ws_id: str) -> dict[int, list[dict[str, Any]]]:
         with self._conn() as conn:
