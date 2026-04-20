@@ -182,30 +182,35 @@
   outline-offset: 2px;
 }
 
+/* Approve and Always are siblings — same ok hue, differentiated by fill
+   (filled vs outlined) and border-style (solid vs dashed). Matches the
+   pre-refactor convention in turnstone/shared_static/chat.css (look for
+   .ts-approval-btn--approve using --green). Four stacked non-colour
+   cues for WCAG 1.4.1: fill state, border style, label, position. */
 [data-design="v1"] .approval-dock button.act.primary {
-  background: color-mix(in srgb, var(--warn) 22%, var(--panel));
-  /* Same darkening pattern as .btn.approve — warn-on-warn-tint needs ink
-     to pass AA. */
-  color: color-mix(in srgb, var(--warn) 55%, var(--ink));
-  border-color: color-mix(in srgb, var(--warn) 60%, var(--hair));
+  background: color-mix(in srgb, var(--ok) 28%, var(--panel));
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 65%, var(--hair));
   font-weight: 600;
 }
 
 [data-design="v1"] .approval-dock button.act.primary:hover {
-  background: color-mix(in srgb, var(--warn) 32%, var(--panel));
+  background: color-mix(in srgb, var(--ok) 40%, var(--panel));
   color: var(--ink);
-  border-color: var(--warn);
+  border-color: var(--ok);
 }
 
 [data-design="v1"] .approval-dock button.act.always {
+  background: transparent;
   border-style: dashed;
-  border-color: color-mix(in srgb, var(--ink-3) 45%, var(--hair));
-  color: var(--ink-3);
+  border-color: color-mix(in srgb, var(--ok) 65%, var(--hair));
+  color: var(--ok-text);
 }
 
 [data-design="v1"] .approval-dock button.act.always:hover {
+  background: color-mix(in srgb, var(--ok) 15%, var(--panel));
   color: var(--ink);
-  border-color: var(--ink-3);
+  border-color: var(--ok);
 }
 
 [data-design="v1"] .approval-dock button.act.danger {

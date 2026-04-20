@@ -30,11 +30,15 @@
 
 [data-design="v1"] .pill.running {
   background: var(--ok-soft);
+  /* Text on --ok (not --ok-live) for AA contrast against pale --ok-soft
+     in light mode — --ok-live on --ok-soft lands ~3.8:1 which fails AA
+     for 11px/500. Liveness signal moves to the dot (bright --ok-live +
+     pulse) which doesn't need to pass text-contrast thresholds. */
   color: var(--ok);
 }
 [data-design="v1"] .pill.running .d {
-  background: var(--ok);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent);
+  background: var(--ok-live);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-live) 30%, transparent);
   animation: ts-pulse 1.8s infinite;
 }
 
@@ -105,14 +109,29 @@
   opacity: 0.9;
 }
 
-[data-design="v1"] .k-badge.k-tools,
-[data-design="v1"] .k-badge.k-approval {
-  background: color-mix(in srgb, var(--warn) 14%, var(--panel));
+/* k-tools — gold (warn family). Fill is a subtle warm whisper on dark;
+   signal lives in the gold border + gold text. Glyph ⚙ (gear). */
+[data-design="v1"] .k-badge.k-tools {
+  background: var(--warn-tint);
   color: color-mix(in srgb, var(--warn) 70%, var(--ink-2));
-  border-color: color-mix(in srgb, var(--warn) 38%, var(--hair));
+  border-color: color-mix(in srgb, var(--warn-tint-border) 60%, var(--hair));
 }
-[data-design="v1"] .k-badge.k-tools::before,
-[data-design="v1"] .k-badge.k-approval::before { content: "▲"; }
+
+/* k-approval — green (ok family), matching the Approve button. Reading
+   a "⚠ approval" k-badge and then clicking an Approve button completes
+   the same-colour-family story. */
+[data-design="v1"] .k-badge.k-approval {
+  background: color-mix(in srgb, var(--ok) 14%, var(--panel));
+  color: color-mix(in srgb, var(--ok) 70%, var(--ink-2));
+  border-color: color-mix(in srgb, var(--ok) 38%, var(--hair));
+}
+/* Glyph-per-kind — semantic symbols rather than generic shapes, carrying
+   the WCAG 1.4.1 non-colour signal. All from Unicode common blocks so
+   they render reliably under Inter + system-ui. */
+[data-design="v1"] .k-badge.k-tools::before    { content: "⚙"; }  /* gear — tooling */
+/* \FE0E forces text presentation — ⚠ and ⚖ auto-promote to emoji (yellow
+   triangle / blue-white scales) on iOS/macOS Safari without it. */
+[data-design="v1"] .k-badge.k-approval::before { content: "⚠\FE0E"; }  /* warning — pending attention */
 
 [data-design="v1"] .k-badge.k-policy,
 [data-design="v1"] .k-badge.k-role,
@@ -123,26 +142,25 @@
   color: color-mix(in srgb, var(--accent) 70%, var(--ink-2));
   border-color: color-mix(in srgb, var(--accent) 38%, var(--hair));
 }
-[data-design="v1"] .k-badge.k-policy::before,
-[data-design="v1"] .k-badge.k-role::before,
-[data-design="v1"] .k-badge.k-oidc::before,
-[data-design="v1"] .k-badge.k-token::before,
-[data-design="v1"] .k-badge.k-step-up::before { content: "◆"; }
+[data-design="v1"] .k-badge.k-policy::before  { content: "§"; }  /* section — legal / policy */
+[data-design="v1"] .k-badge.k-role::before    { content: "◉"; }  /* identity dot — role */
+[data-design="v1"] .k-badge.k-oidc::before    { content: "⌘"; }  /* command — auth */
+[data-design="v1"] .k-badge.k-token::before   { content: "◆"; }  /* diamond — token / chip (universal font coverage; ⬢ tofus without Noto Symbols 2) */
+[data-design="v1"] .k-badge.k-step-up::before { content: "⇧"; }  /* shift — escalation */
 
 [data-design="v1"] .k-badge.k-judge {
   background: color-mix(in srgb, var(--think) 14%, var(--panel));
   color: color-mix(in srgb, var(--think) 70%, var(--ink-2));
   border-color: color-mix(in srgb, var(--think) 38%, var(--hair));
 }
-[data-design="v1"] .k-badge.k-judge::before { content: "◇"; }
+[data-design="v1"] .k-badge.k-judge::before { content: "⚖\FE0E"; }  /* scales — judgement (text-presentation selector) */
 
-[data-design="v1"] .k-badge.k-query::before { content: "■"; }
-
-[data-design="v1"] .k-badge.k-session::before,
-[data-design="v1"] .k-badge.k-skill::before,
-[data-design="v1"] .k-badge.k-workstream::before,
-[data-design="v1"] .k-badge.k-fanout::before,
-[data-design="v1"] .k-badge.k-default::before { content: "•"; }
+[data-design="v1"] .k-badge.k-query::before      { content: "?"; }  /* question */
+[data-design="v1"] .k-badge.k-session::before    { content: "◈"; }  /* session */
+[data-design="v1"] .k-badge.k-skill::before      { content: "★"; }  /* skill */
+[data-design="v1"] .k-badge.k-workstream::before { content: "⇉"; }  /* parallel — workstream */
+[data-design="v1"] .k-badge.k-fanout::before     { content: "⇶"; }  /* branching — fanout */
+[data-design="v1"] .k-badge.k-default::before    { content: "·"; }  /* fallback */
 
 /* chip — literal id or tag */
 [data-design="v1"] .chip {
@@ -173,6 +191,6 @@
 [data-design="v1"] .risk.low  { background: var(--ok-soft);   color: var(--ok); }
 [data-design="v1"] .risk.med  { background: var(--warn-soft); color: var(--warn); }
 [data-design="v1"] .risk.high { background: var(--err-soft);  color: var(--err); }
-/* .risk.crit always-white — dark-mode --panel (#15181c) on bright err falls
-   to ~3:1 and fails AA; white stays high-contrast in both themes. */
-[data-design="v1"] .risk.crit { background: var(--err);       color: #fff; }
+/* .risk.crit — darker filled red via --err-fill (bright --err as a fill
+   reads as alarm-loud). White text in both themes for max contrast. */
+[data-design="v1"] .risk.crit { background: var(--err-fill);  color: #fff; }

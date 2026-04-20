@@ -6,8 +6,11 @@
      .btn           neutral (hair border, panel bg)
      .btn.primary   accent-tinted (used for key ok/continue actions)
      .btn.deny      err-tinted (destructive secondary)
-     .btn.approve   warn-tinted (approval actions — NEVER green; amber is
-                    the product signal for "needs attention → resolved") */
+     .btn.approve   ok-tinted (approval actions — green per existing
+                    turnstone chat.css convention, deliberately breaking
+                    the Claude Design spec which preferred amber. Amber
+                    remains the "needs attention" surface for k-badges
+                    and .pill.attn / .risk.med). */
 
 [data-design="v1"] .btn {
   display: inline-flex;
@@ -62,18 +65,21 @@
 }
 
 [data-design="v1"] .btn.approve {
-  background: color-mix(in srgb, var(--warn) 22%, var(--panel));
-  /* Warn-on-warn-tinted is borderline AA; darken resting text so the
-     primary approval call-to-action is readable without hover. */
-  color: color-mix(in srgb, var(--warn) 55%, var(--ink));
-  border-color: color-mix(in srgb, var(--warn) 60%, var(--hair));
+  /* Green-on-green-tinted — greens don't mud through cool panels the way
+     warm colours do, so runtime color-mix is safe here. 28% fill gives
+     the button visible body against the panel without washing out the
+     text contrast. --ok-text is theme-aware (dark forest in light,
+     bright mint in dark) for ≥7:1 against the tinted bg in both. */
+  background: color-mix(in srgb, var(--ok) 28%, var(--panel));
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 65%, var(--hair));
   font-weight: 600;
 }
 
 [data-design="v1"] .btn.approve:hover {
-  background: color-mix(in srgb, var(--warn) 32%, var(--panel));
+  background: color-mix(in srgb, var(--ok) 40%, var(--panel));
   color: var(--ink);
-  border-color: var(--warn);
+  border-color: var(--ok);
 }
 
 [data-design="v1"] .btn .kbd {
