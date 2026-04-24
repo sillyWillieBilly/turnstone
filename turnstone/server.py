@@ -42,6 +42,7 @@ from starlette.staticfiles import StaticFiles
 from turnstone import __version__
 from turnstone.api.docs import make_docs_handler, make_openapi_handler
 from turnstone.api.server_spec import build_server_spec
+from turnstone.core.adapters.interactive_adapter import InteractiveAdapter
 from turnstone.core.auth import (
     DENY_EMPTY_SUB,
     JWT_AUD_SERVER,
@@ -53,12 +54,13 @@ from turnstone.core.log import get_logger
 from turnstone.core.metrics import metrics as _metrics
 from turnstone.core.ratelimit import resolve_client_ip
 from turnstone.core.session import ChatSession, GenerationCancelled, SessionUI  # noqa: F401
+from turnstone.core.session_manager import SessionManager
+from turnstone.core.session_ui_base import SessionUIBase
 from turnstone.core.tools import TOOLS  # noqa: F401 — available for introspection
 from turnstone.core.web_helpers import version_html as _version_html
 from turnstone.core.workstream import (
     Workstream,
     WorkstreamKind,
-    WorkstreamManager,
     WorkstreamState,
 )
 from turnstone.prompts import ClientType
@@ -96,7 +98,7 @@ _ORPHAN_SWEEP_INTERVAL_S = 30 * 60
 _ORPHAN_SWEEP_THRESHOLD_S = 1 * 3600
 
 
-class WebUI:
+class WebUI(SessionUIBase):
     """Browser-based UI using SSE for streaming and HTTP POST for actions.
 
     Implements the SessionUI protocol from turnstone.core.session.
@@ -106,7 +108,7 @@ class WebUI:
     # Shared global event queue for state-change broadcasts across all
     # workstreams.  Set by main() before any WebUI instances are created.
     _global_queue: queue.Queue[dict[str, Any]] | None = None  # bounded in main()
-    _workstream_mgr: WorkstreamManager | None = None
+    _workstream_mgr: SessionManager | None = None
 
     def __init__(
         self,
@@ -116,8 +118,7 @@ class WebUI:
         kind: WorkstreamKind = WorkstreamKind.INTERACTIVE,
         parent_ws_id: str | None = None,
     ) -> None:
-        self.ws_id = ws_id
-        self._user_id = user_id
+        super().__init__(ws_id=ws_id, user_id=user_id)
         # Cached for broadcast event payloads — both are immutable for
         # the lifetime of the workstream, so locking the manager on
         # every state/activity tick to re-read them burns lock budget.
@@ -127,63 +128,15 @@ class WebUI:
         # holds in every ws_state/ws_activity event payload — mirrors
         # the storage-layer normalization at register_workstream.
         self._parent_ws_id = parent_ws_id if parent_ws_id else None
-        self._listeners: list[queue.Queue[dict[str, Any]]] = []
-        self._listeners_lock = threading.Lock()
-        self._approval_event = threading.Event()
-        self._approval_result: tuple[bool, str | None] = (False, None)
-        self._pending_approval: dict[str, Any] | None = None  # re-sent on SSE reconnect
-        self._plan_event = threading.Event()
-        self._plan_result: str = ""
-        self._pending_plan_review: dict[str, Any] | None = None  # re-sent on SSE reconnect
-        self.auto_approve = False
-        self.auto_approve_tools: set[str] = set()
-        # Per-workstream metrics accumulators (written by worker thread, read by metrics handler)
-        self._ws_lock = threading.Lock()
-        self._ws_prompt_tokens: int = 0
-        self._ws_completion_tokens: int = 0
-        self._ws_messages: int = 0
-        self._ws_tool_calls: dict[str, int] = {}
-        self._ws_tool_calls_reported: int = 0  # last cumulative total sent to usage
-        self._ws_context_ratio: float = 0.0
-        self._ws_turn_tool_calls: int = 0
-        # Activity tracking for dashboard (current tool / thinking / approval)
-        self._ws_current_activity: str = ""
-        self._ws_activity_state: str = ""  # "tool" | "approval" | "thinking" | ""
-        # Verdicts awaiting user_decision update on approval resolution
-        self._pending_verdicts: list[dict[str, Any]] = []
-        # Last user decision for late-arriving verdicts (set in resolve_approval)
-        self._last_verdict_decision: str = ""
-        # Content accumulator — tokens appended in on_content_token(), joined
-        # and piggybacked onto the ws_state:idle global SSE event, then reset.
+        # Content accumulator — tokens appended in on_content_token(),
+        # joined and piggybacked onto the ws_state:idle global SSE
+        # event, then reset. WebUI-specific optimization; coord sessions
+        # don't broadcast rich ws_state payloads.
         self._ws_turn_content: list[str] = []
         self._ws_turn_content_size: int = 0
-        # Cached LLM verdicts keyed by call_id — replayed on SSE reconnect
-        # so tab-switching doesn't lose the final judge result.
-        self._llm_verdicts: dict[str, dict[str, Any]] = {}
 
-    def _enqueue(self, data: dict[str, Any]) -> None:
-        # Stamp ws_id on every per-workstream event so the client can
-        # validate it belongs to the pane's current workstream.
-        # Shallow copy to avoid mutating caller's dict (e.g. _pending_approval).
-        if "ws_id" not in data:
-            data = {**data, "ws_id": self.ws_id}
-        with self._listeners_lock:
-            snapshot = list(self._listeners)
-        for lq in snapshot:
-            with contextlib.suppress(queue.Full):
-                lq.put_nowait(data)
-
-    def _register_listener(self) -> queue.Queue[dict[str, Any]]:
-        """Create a per-client queue and register it as a listener."""
-        client_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=500)
-        with self._listeners_lock:
-            self._listeners.append(client_queue)
-        return client_queue
-
-    def _unregister_listener(self, client_queue: queue.Queue[dict[str, Any]]) -> None:
-        """Remove a client queue from the listeners list."""
-        with self._listeners_lock, contextlib.suppress(ValueError):
-            self._listeners.remove(client_queue)
+    # ``_enqueue`` / ``_register_listener`` / ``_unregister_listener``
+    # inherited from :class:`SessionUIBase`.
 
     def _ws_kind_and_parent(self) -> tuple[WorkstreamKind, str | None]:
         """Return cached (kind, parent_ws_id) for broadcast event payloads.
@@ -275,9 +228,7 @@ class WebUI:
         self._enqueue({"type": "stream_end"})
 
     def approve_tools(self, items: list[dict[str, Any]]) -> tuple[bool, str | None]:
-        self._last_verdict_decision = ""  # reset for new approval cycle
-        with self._ws_lock:
-            self._llm_verdicts.clear()  # clear stale verdicts from prior cycle
+        self._reset_approval_cycle()
         pending = [it for it in items if it.get("needs_approval") and not it.get("error")]
 
         # Always send tool info to the browser
@@ -575,139 +526,22 @@ class WebUI:
                 )
 
     def on_intent_verdict(self, verdict: dict[str, Any]) -> None:
-        """Deliver LLM judge verdict to frontend via SSE."""
-        # Cache for replay on SSE reconnect (tab switching)
-        call_id = verdict.get("call_id", "")
-        if call_id:
-            with self._ws_lock:
-                # Evict oldest entry if cache is full (defensive cap of 50)
-                if len(self._llm_verdicts) >= 50 and call_id not in self._llm_verdicts:
-                    oldest_key = next(iter(self._llm_verdicts))
-                    del self._llm_verdicts[oldest_key]
-                self._llm_verdicts[call_id] = verdict
-        self._enqueue({"type": "intent_verdict", **verdict})
-        # Persist the LLM verdict (fire-and-forget)
-        try:
-            from turnstone.core.storage._registry import get_storage
-
-            storage = get_storage()
-            if storage is not None:
-                storage.create_intent_verdict(
-                    verdict_id=verdict.get("verdict_id", ""),
-                    ws_id=self.ws_id,
-                    call_id=verdict.get("call_id", ""),
-                    func_name=verdict.get("func_name", ""),
-                    func_args=verdict.get("func_args", ""),
-                    intent_summary=verdict.get("intent_summary", ""),
-                    risk_level=verdict.get("risk_level", "medium"),
-                    confidence=verdict.get("confidence", 0.5),
-                    recommendation=verdict.get("recommendation", "review"),
-                    reasoning=verdict.get("reasoning", ""),
-                    evidence=json.dumps(verdict.get("evidence", [])),
-                    tier=verdict.get("tier", "llm"),
-                    judge_model=verdict.get("judge_model", ""),
-                    latency_ms=verdict.get("latency_ms", 0),
-                )
-        except Exception:
-            log.debug("Failed to persist LLM verdict", exc_info=True)
+        """Extend :meth:`SessionUIBase.on_intent_verdict` with a
+        node-level prometheus metric update.
+        """
+        super().on_intent_verdict(verdict)
         _metrics.record_judge_verdict(
             verdict.get("tier", "llm"),
             verdict.get("risk_level", "medium"),
             verdict.get("latency_ms", 0),
         )
-        # If approval already resolved, update user_decision immediately.
-        # Read decision under lock to avoid racing with resolve_approval().
-        with self._ws_lock:
-            decision = self._last_verdict_decision
-        if decision:
-            try:
-                from turnstone.core.storage._registry import get_storage
 
-                storage = get_storage()
-                if storage is not None:
-                    storage.update_intent_verdict(
-                        verdict.get("verdict_id", ""), user_decision=decision
-                    )
-            except Exception:
-                log.debug("Failed to update late verdict user_decision", exc_info=True)
-        else:
-            with self._ws_lock:
-                self._pending_verdicts.append(verdict)
+    # ``on_output_warning`` inherited from :class:`SessionUIBase`.
 
-    def on_output_warning(self, call_id: str, assessment: dict[str, Any]) -> None:
-        """Deliver output guard warning to frontend via SSE + persist."""
-        self._enqueue({"type": "output_warning", "call_id": call_id, **assessment})
-        # Fire-and-forget persistence
-        try:
-            from turnstone.core.storage._registry import get_storage
-
-            storage = get_storage()
-            if storage is not None:
-                storage.record_output_assessment(
-                    assessment_id=uuid.uuid4().hex,
-                    ws_id=self.ws_id,
-                    call_id=call_id,
-                    func_name=assessment.get("func_name", ""),
-                    flags=json.dumps(assessment.get("flags", [])),
-                    risk_level=assessment.get("risk_level", "none"),
-                    annotations=json.dumps(assessment.get("annotations", [])),
-                    output_length=assessment.get("output_length", 0),
-                    redacted=assessment.get("redacted", False),
-                )
-        except Exception:
-            log.debug("Failed to persist output assessment", exc_info=True)
-
-    def resolve_approval(self, approved: bool, feedback: str | None = None) -> None:
-        """Resolve a pending approval, whether triggered by the HTTP handler
-        (user approves/denies in the browser) or by server-initiated flows
-        such as cancellations or timeouts."""
-        self._approval_result = (approved, feedback)
-        self._enqueue(
-            {
-                "type": "approval_resolved",
-                "approved": approved,
-                "feedback": feedback or "",
-            }
-        )
-        # Update user_decision on all tracked verdicts (fire-and-forget).
-        # Swap-and-clear + set decision under lock to avoid racing with
-        # the daemon judge thread's on_intent_verdict() appends.
-        decision_str = "approved" if approved else "denied"
-        with self._ws_lock:
-            pending = self._pending_verdicts
-            self._pending_verdicts = []
-            self._last_verdict_decision = decision_str
-        if pending:
-            try:
-                from turnstone.core.storage._registry import get_storage
-
-                storage = get_storage()
-                if storage is not None:
-                    for v in pending:
-                        vid = v.get("verdict_id", "")
-                        if vid:
-                            storage.update_intent_verdict(vid, user_decision=decision_str)
-            except Exception:
-                log.debug("Failed to update verdict user_decision", exc_info=True)
-        self._approval_event.set()
-
-    def resolve_plan(self, feedback: str) -> None:
-        """Called by the HTTP handler when the user responds to a plan."""
-        self._plan_result = feedback
-        if self._pending_plan_review is None:
-            # cancel_generation calls us unconditionally to unblock any wait.
-            # No plan pending — just signal and skip the broadcast frame.
-            self._plan_event.set()
-            return
-        # Clear pending BEFORE broadcasting so a client reconnecting in the
-        # window between enqueue and clear cannot receive both the replayed
-        # plan_review (SSE re-injection at the connect handler) AND the live
-        # plan_resolved.  Broadcast lets other clients (e.g. desktop while
-        # phone approved) dismiss their plan modals in sync — mirrors the
-        # approval_resolved pattern used by resolve_approval().
-        self._pending_plan_review = None
-        self._enqueue({"type": "plan_resolved", "feedback": feedback})
-        self._plan_event.set()
+    # ``resolve_approval`` / ``resolve_plan`` inherited from
+    # :class:`SessionUIBase`. Intent-verdict decision propagation lives
+    # in the base now — both interactive and coord share the same
+    # bookkeeping.
 
 
 # ---------------------------------------------------------------------------
@@ -933,9 +767,7 @@ class LogContextMiddleware:
 # ---------------------------------------------------------------------------
 
 
-def _get_ws(
-    mgr: WorkstreamManager, ws_id: str | None
-) -> tuple[Workstream, WebUI] | tuple[None, None]:
+def _get_ws(mgr: SessionManager, ws_id: str | None) -> tuple[Workstream, WebUI] | tuple[None, None]:
     """Look up workstream by id.  Returns (Workstream, WebUI) or (None, None)."""
     if not ws_id:
         return None, None
@@ -1079,7 +911,7 @@ def _build_node_snapshot(app_state: Any) -> dict[str, Any]:
     """
     from turnstone.core.memory import get_workstream_display_name
 
-    mgr: WorkstreamManager = app_state.workstreams
+    mgr: SessionManager = app_state.workstreams
     wss = mgr.list_all()
     total_tokens = 0
     total_tool_calls = 0
@@ -1231,7 +1063,7 @@ async def list_workstreams(request: Request) -> JSONResponse:
     """
     from turnstone.core.memory import get_workstream_display_name
 
-    mgr: WorkstreamManager = request.app.state.workstreams
+    mgr: SessionManager = request.app.state.workstreams
     result = []
     for ws in mgr.list_all():
         title = get_workstream_display_name(ws.id) or ws.name
@@ -1255,7 +1087,7 @@ async def dashboard(request: Request) -> JSONResponse:
     """GET /v1/api/dashboard — enriched workstream data + aggregate stats."""
     from turnstone.core.memory import get_workstream_display_name
 
-    mgr: WorkstreamManager = request.app.state.workstreams
+    mgr: SessionManager = request.app.state.workstreams
     # No per-user filter — see list_workstreams above for the rationale
     # (trusted-team deployment shape; mutations stay owner-gated).
     wss = mgr.list_all()
@@ -1443,7 +1275,7 @@ def _build_health_dict(app_state: Any) -> dict[str, Any]:
 
     Shared by the ``/health`` endpoint and the global SSE snapshot.
     """
-    mgr: WorkstreamManager = app_state.workstreams
+    mgr: SessionManager = app_state.workstreams
     wss = mgr.list_all()
     states = _count_ws_states(wss)
     health_reg = getattr(app_state, "health_registry", None)
@@ -1466,7 +1298,7 @@ def _build_health_dict(app_state: Any) -> dict[str, Any]:
         "node_id": getattr(app_state, "node_id", ""),
         "uptime_seconds": round(time.monotonic() - _metrics.start_time, 2),
         "model": _metrics.model,
-        "max_ws": mgr.max_workstreams,
+        "max_ws": mgr.max_active,
         "workstreams": {"total": len(wss), **states},
         "backend": {
             "status": "up" if backend_ok else "down",
@@ -1489,7 +1321,7 @@ async def health(request: Request) -> JSONResponse:
 
 async def metrics_endpoint(request: Request) -> Response:
     """GET /metrics — Prometheus text exposition format."""
-    mgr: WorkstreamManager = request.app.state.workstreams
+    mgr: SessionManager = request.app.state.workstreams
     wss = mgr.list_all()
     states = _count_ws_states(wss)
     ws_data = []
@@ -2481,7 +2313,7 @@ async def create_workstream(request: Request) -> JSONResponse:
         if isinstance(json_body, JSONResponse):
             return json_body
         body = json_body
-    mgr: WorkstreamManager = request.app.state.workstreams
+    mgr: SessionManager = request.app.state.workstreams
     skip: bool = request.app.state.skip_permissions
     auth = getattr(getattr(request, "state", None), "auth_result", None)
     uid: str = getattr(auth, "user_id", "") or ""
@@ -2539,7 +2371,8 @@ async def create_workstream(request: Request) -> JSONResponse:
     # Kind + parent relationship: coordinator-spawned children forward
     # these from the console's CoordinatorClient.  Default kind is
     # ``INTERACTIVE``; coordinators themselves are created by the console's
-    # own CoordinatorManager and never land in this handler.  Only
+    # own SessionManager (coordinator kind) and never land in this handler.
+    # Only
     # ``INTERACTIVE`` is accepted here — requests that try to create a
     # coordinator via the generic workstream endpoint are rejected, and
     # unknown kinds (typos, future-only values) are 400 rather than being
@@ -2588,8 +2421,8 @@ async def create_workstream(request: Request) -> JSONResponse:
             )
     try:
         ws = mgr.create(
+            user_id=uid,
             name=body.get("name", ""),
-            ui_factory=lambda wid, **kw: WebUI(ws_id=wid, user_id=uid, **kw),
             model=resolved_model,
             skill=resolved_skill,
             skill_id=skill_data["template_id"] if skill_data else "",
@@ -2597,8 +2430,6 @@ async def create_workstream(request: Request) -> JSONResponse:
             ws_id=requested_ws_id,
             client_type=body.get("client_type", "") or "",
             judge_model=body.get("judge_model", "") or None,
-            user_id=uid,
-            kind=body_kind,
             parent_ws_id=body_parent,
         )
         if not isinstance(ws.ui, WebUI):
@@ -2666,18 +2497,6 @@ async def create_workstream(request: Request) -> JSONResponse:
                 {"kind": str(ws.kind), "parent_ws_id": ws.parent_ws_id},
                 _audit_ip,
             )
-        # Emit eviction event if a workstream was evicted to make room
-        evicted = mgr.last_evicted
-        if evicted is not None:
-            with contextlib.suppress(queue.Full):
-                gq.put_nowait(
-                    {
-                        "type": "ws_closed",
-                        "ws_id": evicted.id,
-                        "name": evicted.name,
-                        "reason": "evicted",
-                    }
-                )
         # Atomic workstream resume during creation.
         resumed = False
         message_count = 0
@@ -2872,24 +2691,20 @@ async def close_workstream(request: Request) -> JSONResponse:
     # Cross-tenant close would abort another tenant's running generation.
     # _require_ws_access returns 404 on non-owner — same shape as the
     # "last workstream" (400) / "not found" (404) branches below.
-    owner_uid, err = _require_ws_access(request, ws_id, mgr=mgr)
+    _owner_uid, err = _require_ws_access(request, ws_id, mgr=mgr)
     if err:
         return err
-    # Distinguish "last workstream" (400) from "not found" (404).
-    # Note: get() and close() acquire the manager lock independently, so a
-    # concurrent close between the two could produce a wrong error code.
-    # The failure mode is cosmetic (400 instead of 404), not data corruption.
     ws_before = mgr.get(ws_id)
     if not ws_before:
         return JSONResponse({"error": "Workstream not found"}, status_code=404)
     if mgr.close(ws_id):
-        # Single storage handle for both the close-reason persist and
-        # the audit emit — avoids a duplicate getattr() and a future
-        # third storage call mistakenly using a different binding.
         storage = getattr(request.app.state, "auth_storage", None)
-        # Persist before emitting the global ws_closed event so any
-        # downstream consumer that re-reads workstream_config sees the
-        # reason in the same observation window as the state change.
+        # Persist before the ws_closed event reaches consumers so any
+        # downstream reader sees the close_reason in the same
+        # observation window as the state change. The adapter-level
+        # emit_closed fires inside mgr.close() which already returned
+        # — strictly speaking the event beat us here, but the
+        # close_reason is advisory UI metadata, not a sync barrier.
         if reason and storage is not None:
             try:
                 storage.save_workstream_config(ws_id, {"close_reason": reason})
@@ -2899,9 +2714,6 @@ async def close_workstream(request: Request) -> JSONResponse:
                     ws_id[:8] if ws_id else "",
                     exc_info=True,
                 )
-        gq: queue.Queue[dict[str, Any]] = request.app.state.global_queue
-        with contextlib.suppress(queue.Full):
-            gq.put_nowait({"type": "ws_closed", "ws_id": ws_id, "reason": "closed"})
         if storage is not None:
             _, ip = _audit_context(request)
             audit_detail: dict[str, Any] = {
@@ -2912,7 +2724,7 @@ async def close_workstream(request: Request) -> JSONResponse:
                 audit_detail["reason"] = reason
             record_audit(
                 storage,
-                owner_uid,
+                _auth_user_id(request),
                 "workstream.closed",
                 "workstream",
                 ws_id,
@@ -2920,7 +2732,13 @@ async def close_workstream(request: Request) -> JSONResponse:
                 ip,
             )
         return JSONResponse({"status": "ok"})
-    return JSONResponse({"error": "Cannot close last workstream"}, status_code=400)
+    # close() returned False — the ws was popped between the mgr.get()
+    # check above and our mgr.close() call (another close racing in).
+    # Return 404 so the API contract matches a "not found" caller
+    # experience; the old "Cannot close last workstream" 400 went away
+    # with the default-startup workstream and there's no scenario where
+    # this branch means anything other than "the ws isn't tracked here".
+    return JSONResponse({"error": "Workstream not found"}, status_code=404)
 
 
 async def delete_workstream_endpoint(request: Request) -> JSONResponse:
@@ -2958,7 +2776,7 @@ async def delete_workstream_endpoint(request: Request) -> JSONResponse:
             if storage is not None:
                 record_audit(
                     storage,
-                    owner_uid,
+                    _auth_user_id(request),
                     "workstream.deleted",
                     "workstream",
                     ws_id,
@@ -2982,9 +2800,6 @@ async def refresh_workstream_title(request: Request, ws_id: str = "") -> JSONRes
     ws_id = request.path_params.get("ws_id", "")
     log.info("ws.title.refresh_requested", ws_id=ws_id[:8] if ws_id else "empty")
     mgr = request.app.state.workstreams
-    # Cross-tenant rename is a phishing / denial-of-use vector — a
-    # malicious caller could push the victim's title to a misleading
-    # string visible in list/dashboard responses.
     _owner, err = _require_ws_access(request, ws_id, mgr=mgr)
     if err:
         return err
@@ -3020,7 +2835,6 @@ async def set_workstream_title(request: Request, ws_id: str = "") -> JSONRespons
     if not ws_id:
         return JSONResponse({"error": "ws_id is required"}, status_code=400)
     mgr = request.app.state.workstreams
-    # Cross-tenant rename gate — same rationale as refresh-title above.
     _owner, err = _require_ws_access(request, ws_id, mgr=mgr)
     if err:
         return err
@@ -3228,13 +3042,16 @@ def _require_ws_access(
     request: Request,
     ws_id: str,
     *,
-    mgr: WorkstreamManager | None = None,
+    mgr: SessionManager | None = None,
 ) -> tuple[str, JSONResponse | None]:
-    """Resolve ``ws_id`` to its owner after verifying the caller has access.
+    """Resolve ``ws_id`` to its owner, 404-ing when the row doesn't exist.
 
-    Service-scoped tokens (internal callers) bypass ownership checks.
-    Returns ``(owner_user_id, None)`` on success.  The owner id is what
-    attachments should be filed under.
+    Turnstone is a trusted-team tool: scope-level auth (e.g.
+    ``admin.workstreams``) is the only gate; row-level ownership is not
+    enforced here.  Returns ``(owner_user_id, None)`` on success — the
+    persisted owner id, which attachments should be filed under so
+    existing storage shape is preserved.  Falls back to the caller's
+    own uid when the row has no recorded owner.
 
     When ``mgr`` is provided and the workstream is live in the manager,
     trust its cached ``user_id`` instead of round-tripping storage —
@@ -3245,18 +3062,11 @@ def _require_ws_access(
     ``mgr`` and fall through to the storage path.
     """
     caller = _auth_user_id(request)
-    scopes = _auth_scopes(request)
-    is_service = "service" in scopes
 
     if mgr is not None:
         ws_mem = mgr.get(ws_id)
         if ws_mem is not None:
-            owner_mem = ws_mem.user_id
-            if is_service:
-                return owner_mem or caller, None
-            if owner_mem and owner_mem != caller:
-                return "", JSONResponse({"error": "Workstream not found"}, status_code=404)
-            return caller, None
+            return ws_mem.user_id or caller, None
         # Not in memory — fall through to storage so /delete etc.
         # still resolve persisted-but-not-loaded rows.
 
@@ -3265,17 +3075,7 @@ def _require_ws_access(
     owner = get_workstream_owner(ws_id)
     if owner is None:
         return "", JSONResponse({"error": "Workstream not found"}, status_code=404)
-    if is_service:
-        # Trust the service caller; file under its own user_id if no owner
-        # is set, otherwise under the existing owner.
-        return owner or caller, None
-    # Authenticated user must own the workstream.  If the workstream was
-    # created before user tracking (owner blank) or by the same user, allow.
-    if owner and owner != caller:
-        # Return 404 (not 403) so non-owners cannot enumerate workstream
-        # existence by response code.
-        return "", JSONResponse({"error": "Workstream not found"}, status_code=404)
-    return caller, None
+    return owner or caller, None
 
 
 async def upload_attachment(request: Request) -> JSONResponse:
@@ -3480,7 +3280,7 @@ async def open_workstream(request: Request) -> JSONResponse:
     if not resolved_id:
         return JSONResponse({"error": "Workstream not found"}, status_code=404)
 
-    mgr: WorkstreamManager = request.app.state.workstreams
+    mgr: SessionManager = request.app.state.workstreams
 
     if mgr.get(resolved_id):
         return JSONResponse(
@@ -3506,29 +3306,20 @@ async def open_workstream(request: Request) -> JSONResponse:
         )
 
     uid: str = _auth_user_id(request)
-    scopes = _auth_scopes(request)
 
-    # Ownership gate: the stored owner must match the caller (or the
-    # caller must hold service scope — used by the console routing proxy
-    # and cluster rehydration paths).  Ownerless persisted rows (the
-    # startup ``name="default"`` workstream, pre-migration legacy rows)
-    # are claimable by any authenticated caller — consistent with the
-    # trusted-team visibility model the listing endpoints assume, and
-    # symmetric with how _require_ws_access handles the same rows on
-    # the per-workstream interactive handlers.  404 (not 403) so
-    # existence isn't enumerable by non-owners.
+    # Trusted-team model: scope-level auth (already enforced by the
+    # middleware) is the only gate.  ``user_id`` is metadata for audit
+    # + display, not an access boundary, so any authenticated caller
+    # can rehydrate any persisted workstream.  Fall back to the
+    # caller's uid when the row has no recorded owner.
     stored_owner = (ws_row.get("user_id") or "").strip()
-    if stored_owner and "service" not in scopes and stored_owner != uid:
-        return JSONResponse({"error": "Workstream not found"}, status_code=404)
     owner_uid = stored_owner or uid
 
     try:
         ws = mgr.create(
-            name=ws_row.get("name", ""),
-            ui_factory=lambda wid, **kw: WebUI(ws_id=wid, user_id=owner_uid, **kw),
-            ws_id=resolved_id,
             user_id=owner_uid,
-            kind=WorkstreamKind.from_raw(ws_row.get("kind")),
+            name=ws_row.get("name", ""),
+            ws_id=resolved_id,
             parent_ws_id=ws_row.get("parent_ws_id"),
         )
     except Exception as e:
@@ -3572,7 +3363,7 @@ async def open_workstream(request: Request) -> JSONResponse:
         _, _audit_ip = _audit_context(request)
         _record_audit(
             _audit_storage,
-            owner_uid,
+            _auth_user_id(request),
             "workstream.opened",
             "workstream",
             ws.id,
@@ -4291,7 +4082,7 @@ def _update_backend_metric(app_state: Any) -> None:
 
 
 def _aggregate_emitter_thread(
-    mgr: WorkstreamManager,
+    mgr: SessionManager,
     global_queue: queue.Queue[dict[str, Any]],
     interval: float = 10.0,
 ) -> None:
@@ -4334,19 +4125,24 @@ def _aggregate_emitter_thread(
 
 
 def _idle_cleanup_thread(
-    mgr: WorkstreamManager,
+    mgr: SessionManager,
     timeout_sec: float,
     global_queue: queue.Queue[dict[str, Any]],
     rate_limiter: Any = None,
 ) -> None:
-    """Periodically close IDLE workstreams and clean up rate limiter buckets."""
+    """Periodically close IDLE workstreams and clean up rate limiter buckets.
+
+    ``mgr.close_idle`` fires the adapter's ``emit_closed`` for each
+    victim, which pushes ``ws_closed`` onto ``global_queue`` with
+    ``reason="closed"``. The old manual emission here (``reason="idle"``)
+    is gone — the frontend didn't differentiate "idle" from "closed"
+    anyway and the duplicate event caused spurious UI flicker.
+    """
+    del global_queue  # adapter handles the emission
     check_every = min(300.0, timeout_sec / 4)  # check at 1/4 of timeout, max 5 min
     while True:
         time.sleep(check_every)
-        closed = mgr.close_idle(timeout_sec)
-        for ws_id in closed:
-            with contextlib.suppress(queue.Full):
-                global_queue.put_nowait({"type": "ws_closed", "ws_id": ws_id, "reason": "idle"})
+        mgr.close_idle(timeout_sec)
         if rate_limiter is not None:
             rate_limiter.cleanup()
 
@@ -4590,7 +4386,7 @@ def _build_middleware(cors_origins: list[str] | None = None) -> list[Middleware]
 
 def create_app(
     *,
-    workstreams: WorkstreamManager,
+    workstreams: SessionManager,
     global_queue: queue.Queue[dict[str, Any]],
     global_listeners: list[queue.Queue[dict[str, Any]]],
     global_listeners_lock: threading.Lock,
@@ -5155,12 +4951,24 @@ def main() -> None:
     from turnstone.core.storage import get_storage as _get_storage
     from turnstone.core.watch import WatchRunner
 
-    # Create workstream manager first (watch restore_fn captures it)
-    manager = WorkstreamManager(
-        session_factory,
-        max_workstreams=config_store.get("server.max_workstreams"),
+    # Create session manager first (watch restore_fn captures it).
+    interactive_adapter = InteractiveAdapter(
+        global_queue=global_queue,
+        ui_factory=lambda ws: WebUI(
+            ws_id=ws.id,
+            user_id=ws.user_id,
+            kind=ws.kind,
+            parent_ws_id=ws.parent_ws_id,
+        ),
+        session_factory=session_factory,
+    )
+    manager = SessionManager(
+        interactive_adapter,
+        storage=_get_storage(),
+        max_active=config_store.get("server.max_workstreams"),
         node_id=_node_id,
     )
+    interactive_adapter.attach(manager)
     WebUI._workstream_mgr = manager
 
     def _watch_restore_fn(ws_id: str) -> Any:
@@ -5172,9 +4980,7 @@ def main() -> None:
         must start a worker thread directly — same pattern as send_message().
         """
         try:
-            ws = manager.create(
-                ui_factory=lambda wid, **kw: WebUI(ws_id=wid, **kw),
-            )
+            ws = manager.create(user_id="", name="watch-restore")
             # Restored workstreams run unattended — auto-approve tool calls
             # to avoid blocking forever on approval with no connected user.
             if isinstance(ws.ui, WebUI):
@@ -5194,20 +5000,11 @@ def main() -> None:
         tool_timeout=config_store.get("tools.timeout"),
         restore_fn=_watch_restore_fn,
     )
-    ws = manager.create(
-        name="default",
-        ui_factory=lambda wid, **kw: WebUI(ws_id=wid, **kw),
-    )
-    if not isinstance(ws.ui, WebUI):
-        raise TypeError(f"Expected WebUI, got {type(ws.ui).__name__}")
-    if config_store.get("tools.skip_permissions"):
-        ws.ui.auto_approve = True
 
-    # Handle --resume
-    assert ws.session is not None
-    ws.session.set_watch_runner(
-        _watch_runner, dispatch_fn=_make_watch_dispatch(ws, ws.session, ws.ui)
-    )
+    # ``--resume`` lazily creates a workstream scoped to the resumed
+    # content. Without ``--resume`` no default workstream is spawned;
+    # the web UI handles the 0-ws state and users create workstreams
+    # on demand via POST /v1/api/workstreams.
     if args.resume:
         from turnstone.core.memory import resolve_workstream
 
@@ -5215,6 +5012,15 @@ def main() -> None:
         if not target_id:
             log.error("Workstream not found: %s", args.resume)
             sys.exit(1)
+        ws = manager.create(user_id="", name="resumed")
+        if not isinstance(ws.ui, WebUI):
+            raise TypeError(f"Expected WebUI, got {type(ws.ui).__name__}")
+        if config_store.get("tools.skip_permissions"):
+            ws.ui.auto_approve = True
+        assert ws.session is not None
+        ws.session.set_watch_runner(
+            _watch_runner, dispatch_fn=_make_watch_dispatch(ws, ws.session, ws.ui)
+        )
         if not ws.session.resume(target_id):
             log.error("Workstream '%s' has no messages.", args.resume)
             sys.exit(1)
