@@ -162,6 +162,78 @@ Three release tracks are maintained:
   ``ws_state``); ``emit_closed`` stays load-bearing as the sole
   transport path for ``ws_closed`` onto the global SSE queue.
 
+- **`cancel` verb body lifted across both kinds** ([Stage 2 Verb
+  Lift — `cancel`]). The interactive ``/v1/api/cancel`` and coord
+  ``/v1/api/workstreams/{ws_id}/cancel`` handlers now share one
+  body via ``make_cancel_handler(cfg, *, audit_emit=None)``;
+  per-kind divergence captured by a new
+  ``cancel_forensics: CancelForensics | None`` field on
+  ``SessionEndpointConfig`` (interactive wires
+  ``_capture_cancel_forensics``; coord wires ``None``).
+  Three observable behaviour changes for coord callers:
+
+  - **Coord cancel now accepts a ``force`` flag.** Same shape as
+    interactive: posting ``{"force": true}`` abandons the worker
+    thread and emits ``stream_end`` so a stuck coord generation
+    can be recovered without waiting for the daemon thread to
+    exit. Pre-lift coord ignored ``force``.
+  - **Coord cancel response always includes ``"dropped"``.**
+    Pre-lift coord returned bare ``{"status": "ok"}``; the lifted
+    body returns ``{"status": "ok", "dropped": {}}`` (always-include
+    parity with interactive). SDK consumers don't need to branch
+    on kind to read ``dropped``.
+  - **Coord cancel returns 400 when the workstream's session is
+    ``None``.** Pre-lift coord called ``coord_mgr.cancel`` which
+    silently no-op'd on a placeholder/build-failed workstream; the
+    lifted body 400s with ``{"error": "No session"}`` for parity
+    with interactive's pre-existing branch.
+
+  Two observable changes for interactive (asymmetric — coord
+  pre-lift already had this behaviour):
+
+  - ``resolve_plan`` now runs on every cancel (previously gated
+    on ``was_running``). ``resolve_plan`` has an internal
+    ``_pending_plan_review is None`` guard, so the call is no-op
+    when no plan review is pending. Lift gives interactive coord's
+    pre-lift recovery path: a stuck plan-pending state from a
+    crashed worker can be cleared via ``cancel`` instead of
+    requiring a workstream close + rehydrate.
+  - ``resolve_approval`` runs on every cancel **only when
+    ``ui._pending_approval is not None``** (the lifted body gates
+    the call). ``resolve_approval`` is not idempotent — it always
+    broadcasts ``approval_resolved`` and overwrites
+    ``_approval_result`` — so the gate prevents a stale resolution
+    event from leaking on idle cancels while preserving the recovery
+    path when an approval really is pending.
+
+  Coord ``coordinator.cancel`` audit detail now includes ``force``
+  so operator-driven recovery is distinguishable from a routine
+  cancel in the audit log.
+
+  Three /review fixes folded into the same commit:
+
+  - **No more stale ``approval_resolved`` SSE event on idle cancel.**
+    The lifted body's ``resolve_approval`` call is now gated on
+    ``ui._pending_approval is not None``. Pre-fix, the unconditional
+    call would broadcast a phantom ``approval_resolved`` to every
+    SSE listener even when no prompt was pending — listener UIs
+    that key on the event would dismiss prompts they didn't have.
+  - **Force-cancel now clears ``_worker_running`` alongside
+    ``worker_thread``.** Previously the force path left the half-
+    state ``(_worker_running=True, worker_thread=None)``, which
+    routed any follow-up ``send`` through the queue-enqueue path
+    onto the abandoned worker (where the cancel flag short-circuits
+    the queue-drain seam, leaving the message orphaned until the
+    next spawn). Restores the
+    ``(worker_thread, _worker_running)`` invariant
+    ``session_worker.send`` documents.
+  - **``coordinator_stop_cascade`` now treats child cancel
+    ``400 + "No session"`` as ``skipped``** (was previously
+    ``failed``). Lifted coord cancel returns 400 on placeholder /
+    build-failed children — matching the pre-lift outcome where
+    those children were silently no-op'd, so the cascade response's
+    ``failed`` bucket no longer fires spurious operator alerts.
+
 ### Security
 
 - **Coord attachment endpoints are now kind-strict**
