@@ -29,16 +29,38 @@ log = get_logger(__name__)
 
 
 class SessionKindAdapter(Protocol):
-    """Per-kind policies the shared ``SessionManager`` delegates to.
+    """Per-kind construction + cleanup policies the shared ``SessionManager`` delegates to.
 
     The manager owns invariant mechanics. The adapter owns:
 
-    - **Transport**: how lifecycle events (``ws_created`` /
-      ``ws_state`` / ``ws_closed``) fan out. Interactive pushes onto a
-      per-UI listener queue + global event queue; coordinator emits on
-      the cluster collector's pseudo-node.
     - **Session construction**: what UI class wraps the workstream,
       what ``ChatSession`` factory signature applies.
+    - **UI cleanup**: unblocking pending approval / plan / foreground
+      events when a workstream closes.
+
+    Lifecycle event fan-out (``ws_created`` / ``ws_state`` /
+    ``ws_closed``) lives on a *separate* Protocol —
+    :class:`SessionEventEmitter` — wired through the manager's
+    optional ``event_emitter`` kwarg. Both production adapters
+    implement *both* Protocols. The asymmetry is in *which* emit
+    methods carry real bodies:
+
+    - Coordinator: all four ``emit_*`` are real — every transition
+      fans out via the cluster collector's pseudo-node.
+    - Interactive: only ``emit_closed`` is load-bearing (it's the
+      sole transport path for ``ws_closed`` onto the global SSE
+      queue); ``emit_created`` / ``emit_state`` / ``emit_rehydrated``
+      are documented no-op stubs because those events fire from
+      out-of-band paths (the create HTTP handler enqueues
+      ``ws_created`` after attachment validation;
+      ``WebUI._broadcast_state`` enqueues a richer ``ws_state``
+      payload than this Protocol carries).
+
+    The manager's ``if self._event_emitter is not None`` guard
+    handles the case where no emitter is wired at all — used by
+    tests that don't care about the event side effects, and reserved
+    for future kinds whose lifecycle transitions don't fan out
+    anywhere.
 
     Intentionally NOT on the Protocol (see design brief's "Decisions
     settled during the pruning pass"): per-kind permission scope
@@ -48,31 +70,6 @@ class SessionKindAdapter(Protocol):
     """
 
     kind: WorkstreamKind
-
-    def emit_created(self, ws: Workstream) -> None: ...
-    def emit_rehydrated(self, ws: Workstream) -> None:
-        """Fire the lifecycle event for a lazy-rehydrated workstream.
-
-        Distinct from ``emit_created`` so coord-side adapters can
-        perform storage-seeded registry rebuilds only on the resurrect
-        path. A freshly-created workstream provably has zero children,
-        so the rebuild query is wasted. Interactive adapters with no
-        such registry just delegate to ``emit_created``.
-        """
-
-    def emit_state(self, ws: Workstream, state: WorkstreamState) -> None: ...
-    def emit_closed(
-        self,
-        ws_id: str,
-        *,
-        reason: str = "closed",
-        name: str = "",
-    ) -> None:
-        """Fire the close event. ``reason`` is "closed" for manual
-        close, "evicted" for capacity eviction (frontend shows a
-        distinct toast). ``name`` is the workstream's display name —
-        the frontend eviction toast includes it so the user sees
-        which workstream was evicted."""
 
     def cleanup_ui(self, ws: Workstream) -> None:
         """Unblock per-UI events on close; cancel + close the session."""
@@ -98,6 +95,57 @@ class SessionKindAdapter(Protocol):
         """
 
 
+class SessionEventEmitter(Protocol):
+    """Optional transport fan-out for lifecycle events.
+
+    Wired into :class:`SessionManager` via the ``event_emitter`` kwarg.
+    Both production adapters implement this Protocol; the manager's
+    ``if self._event_emitter is not None`` guard exists for kinds /
+    tests that omit an emitter entirely.
+
+    Implementing the Protocol does not commit a kind to wiring every
+    method — interactive's ``emit_created`` / ``emit_state`` /
+    ``emit_rehydrated`` are documented no-op stubs because those
+    events fire from out-of-band channels (``WebUI._broadcast_state``
+    for state, the create HTTP handler for ``ws_created`` after
+    attachment validation). Only ``emit_closed`` carries a real body
+    on interactive. Coordinator's four methods are all real (cluster
+    collector's pseudo-node sees every transition). See
+    :class:`SessionKindAdapter` docstring for the asymmetry rationale.
+    """
+
+    def emit_created(self, ws: Workstream) -> None:
+        """Fire the lifecycle event for a freshly created workstream."""
+
+    def emit_rehydrated(self, ws: Workstream) -> None:
+        """Fire the lifecycle event for a lazy-rehydrated workstream.
+
+        Distinct from ``emit_created`` so emitters can do extra setup
+        only on the resurrect path (the coordinator emitter rebuilds
+        its children registry from storage on rehydrate; a fresh
+        ``create`` provably has zero children, so the rebuild query is
+        skipped).
+        """
+
+    def emit_state(self, ws: Workstream, state: WorkstreamState) -> None:
+        """Fire the state-transition event."""
+
+    def emit_closed(
+        self,
+        ws_id: str,
+        *,
+        reason: str = "closed",
+        name: str = "",
+    ) -> None:
+        """Fire the close event.
+
+        ``reason`` is ``"closed"`` for manual close, ``"evicted"`` for
+        capacity eviction (frontend shows a distinct toast). ``name``
+        is the workstream's display name — the eviction toast
+        includes it so the user sees which workstream was evicted.
+        """
+
+
 class SessionManager:
     """Unified lifecycle manager for a single workstream kind.
 
@@ -114,6 +162,7 @@ class SessionManager:
         max_active: int,
         node_id: str | None = None,
         state_writer: StateWriter | None = None,
+        event_emitter: SessionEventEmitter | None = None,
     ) -> None:
         if max_active < 1:
             raise ValueError(f"max_active must be >= 1, got {max_active}")
@@ -125,6 +174,14 @@ class SessionManager:
         # ``ws._lock`` across a sync DB UPDATE. Tests can leave it
         # None and get the legacy direct-write behaviour.
         self._state_writer = state_writer
+        # Optional lifecycle-event emitter. Wired by both production
+        # lifespans (interactive's emitter is the adapter itself, which
+        # also satisfies the Protocol; coord wires its own adapter the
+        # same way). When ``None``, the manager skips every emit_*
+        # call — used by tests that don't care about the event side
+        # effects, and reserved for future kinds whose lifecycle
+        # transitions don't fan out anywhere.
+        self._event_emitter = event_emitter
         self._node_id = node_id
         self._workstreams: dict[str, Workstream] = {}
         self._order: list[str] = []
@@ -143,8 +200,8 @@ class SessionManager:
         # Optional state-change observer. The CLI sets this to a
         # callback that prints a background-attention notification
         # when a non-focused workstream transitions to ATTENTION.
-        # Web/coord paths use the adapter's emit_state for their own
-        # fan-out; this is a second, manager-level hook for callers
+        # Web/coord paths use the event_emitter's emit_state for their
+        # own fan-out; this is a second, manager-level hook for callers
         # that don't consume SSE.
         self._on_state_change: Callable[[str, WorkstreamState], None] | None = None
 
@@ -252,7 +309,8 @@ class SessionManager:
 
         if evicted is not None:
             self._adapter.cleanup_ui(evicted)
-            self._adapter.emit_closed(evicted.id, reason="evicted", name=evicted.name)
+            if self._event_emitter is not None:
+                self._event_emitter.emit_closed(evicted.id, reason="evicted", name=evicted.name)
 
         # Persist before session construction. Fail-closed: if the row
         # can't be written, the in-memory session would be invisible to
@@ -292,7 +350,8 @@ class SessionManager:
                 self._remove_locked(ws_id)
             raise
 
-        self._adapter.emit_created(ws)
+        if self._event_emitter is not None:
+            self._event_emitter.emit_created(ws)
         return ws
 
     # ------------------------------------------------------------------
@@ -346,7 +405,10 @@ class SessionManager:
 
                 if evicted is not None:
                     self._adapter.cleanup_ui(evicted)
-                    self._adapter.emit_closed(evicted.id, reason="evicted", name=evicted.name)
+                    if self._event_emitter is not None:
+                        self._event_emitter.emit_closed(
+                            evicted.id, reason="evicted", name=evicted.name
+                        )
 
                 try:
                     ws.session = self._adapter.build_session(ws)
@@ -369,7 +431,8 @@ class SessionManager:
                 # last close(). The next set_state() call syncs it
                 # naturally; writing 'idle' here could race a concurrent
                 # close() that writes 'closed' under self._lock.
-                self._adapter.emit_rehydrated(ws)
+                if self._event_emitter is not None:
+                    self._event_emitter.emit_rehydrated(ws)
                 return ws
         finally:
             self._release_open_lock(ws_id)
@@ -437,7 +500,8 @@ class SessionManager:
                 self._storage.delete_workstream_override(ws_id)
             except Exception:
                 log.debug("session_mgr.override_delete_failed ws=%s", ws_id[:8], exc_info=True)
-        self._adapter.emit_closed(ws_id, name=ws.name)
+        if self._event_emitter is not None:
+            self._event_emitter.emit_closed(ws_id, name=ws.name)
         return True
 
     def set_state(
@@ -481,7 +545,8 @@ class SessionManager:
                     self._storage.update_workstream_state(ws_id, state.value)
                 except Exception:
                     log.debug("session_mgr.state_update_failed ws=%s", ws_id[:8], exc_info=True)
-        self._adapter.emit_state(ws, state)
+        if self._event_emitter is not None:
+            self._event_emitter.emit_state(ws, state)
         if self._on_state_change is not None:
             with contextlib.suppress(Exception):
                 self._on_state_change(ws_id, state)
@@ -559,7 +624,8 @@ class SessionManager:
                     self._storage.delete_workstream_override(ws.id)
                 except Exception:
                     log.debug("session_mgr.override_delete_failed ws=%s", ws.id[:8], exc_info=True)
-            self._adapter.emit_closed(ws.id, name=ws.name)
+            if self._event_emitter is not None:
+                self._event_emitter.emit_closed(ws.id, name=ws.name)
             closed_ids.append(ws.id)
         return closed_ids
 
@@ -666,7 +732,8 @@ class SessionManager:
             # subscribers.
             if evicted is not None:
                 self._adapter.cleanup_ui(evicted)
-                self._adapter.emit_closed(evicted.id, reason="evicted", name=evicted.name)
+                if self._event_emitter is not None:
+                    self._event_emitter.emit_closed(evicted.id, reason="evicted", name=evicted.name)
             raise
         self._workstreams[ws_id] = ws
         self._order.append(ws_id)
