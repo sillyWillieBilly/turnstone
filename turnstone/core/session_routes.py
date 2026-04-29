@@ -786,7 +786,12 @@ def make_approve_handler(cfg: SessionEndpointConfig) -> Handler:
                 if source_map is not None:
                     for t in tool_names:
                         source_map[t] = AutoApproveReason.ALWAYS
-        ui.resolve_approval(approved, feedback)
+        # Forward ``always`` so the resulting ``approval_resolved`` SSE
+        # event carries the intent — peer tabs that didn't click but
+        # are subscribed to the same workstream can render the right
+        # status pill ("✓ approved · always" vs plain "✓ approved")
+        # without needing a side-channel broadcast.
+        ui.resolve_approval(approved, feedback, always=always)
         return JSONResponse({"status": "ok"})
 
     return approve
@@ -2173,6 +2178,21 @@ def make_history_handler(cfg: SessionEndpointConfig) -> Handler:
         if not ws_id:
             return JSONResponse({"error": "ws_id is required"}, status_code=400)
 
+        # Cross-tenant gate.  Pre-PR-447 the response carried only
+        # message rows that an owning user wrote and that owning
+        # user's tools produced — sensitive but bounded to the same
+        # ``user_id`` as the workstream.  Even so, every other lifted
+        # session verb (send / approve / close / cancel / events /
+        # attachments) calls ``cfg.tenant_check`` and history was the
+        # outlier.  Coord wires ``tenant_check=None`` (the
+        # cluster-wide ``admin.coordinator`` permission_gate covers
+        # it); interactive wires ``_interactive_tenant_check`` and
+        # this call now restores parity with the rest of the surface.
+        if cfg.tenant_check is not None:
+            err_tenant = cfg.tenant_check(request, ws_id, mgr)
+            if err_tenant is not None:
+                return err_tenant
+
         # Existence + kind check. The workstream may live only in
         # storage (closed coordinators are still readable via /history
         # without rehydrating; persisted-but-not-loaded interactives
@@ -2262,6 +2282,21 @@ def make_detail_handler(cfg: SessionEndpointConfig) -> Handler:
         if not ws_id:
             return JSONResponse({"error": "ws_id is required"}, status_code=400)
 
+        # Cross-tenant gate.  PR 447 added ``pending_approval_detail``
+        # to the response (tool previews, function arguments, LLM
+        # judge reasoning) — a richer payload than the pre-PR
+        # ``{ws_id, name, state, user_id, kind}`` tuple.  Coord wires
+        # ``tenant_check=None`` (the cluster-wide ``admin.coordinator``
+        # permission_gate covers it); interactive wires
+        # ``_interactive_tenant_check`` so any authenticated user that
+        # GETs another user's ``ws_id`` 404s here instead of reading
+        # the in-flight tool-call payload.  Brings detail in line with
+        # every other lifted session verb.
+        if cfg.tenant_check is not None:
+            err_tenant = cfg.tenant_check(request, ws_id, mgr)
+            if err_tenant is not None:
+                return err_tenant
+
         ws = mgr.get(ws_id)
         if ws is None:
             try:
@@ -2303,6 +2338,42 @@ def make_detail_handler(cfg: SessionEndpointConfig) -> Handler:
                 # mismatch, and tombstoned rows — all surface as 404.
                 return JSONResponse({"error": cfg.not_found_label}, status_code=404)
 
+        # Pending-approval snapshot — lets a freshly-loaded chat tab
+        # paint the inline approval gate from this single response
+        # instead of waiting for the SSE approve_request replay (which
+        # introduces a brief --running flash on reload).  Both keys
+        # (``pending_approval`` + ``pending_approval_detail``) are
+        # always present in the response: a UI that doesn't expose
+        # ``serialize_pending_approval_detail`` (CLI / channel
+        # adapters) reports ``False`` / ``null`` for them.  The
+        # ``_pending_approval`` lookup is asserted as ``dict`` (its
+        # only real production shape — see
+        # ``SessionUIBase._pending_approval``) so a MagicMock-based
+        # unit test or other non-dict sentinel doesn't trip the path.
+        pending_approval = False
+        pending_approval_detail: dict[str, Any] | None = None
+        ui = ws.ui
+        pending_raw = getattr(ui, "_pending_approval", None) if ui is not None else None
+        if isinstance(pending_raw, dict):
+            pending_approval = True
+            serializer = getattr(ui, "serialize_pending_approval_detail", None)
+            if callable(serializer):
+                try:
+                    serialized = serializer()
+                    if isinstance(serialized, dict) or serialized is None:
+                        pending_approval_detail = serialized
+                except Exception:
+                    # Defensive: a malformed verdict object inside the
+                    # serializer shouldn't fail the entire detail
+                    # response.  The boolean still informs the UI that
+                    # an approval is pending; SSE replay carries the
+                    # full payload.
+                    log.warning(
+                        "ws.detail.pending_serialize_failed ws_id=%s",
+                        ws_id[:8] if ws_id else "",
+                        exc_info=True,
+                    )
+
         return JSONResponse(
             {
                 "ws_id": ws.id,
@@ -2310,6 +2381,8 @@ def make_detail_handler(cfg: SessionEndpointConfig) -> Handler:
                 "state": ws.state.value,
                 "user_id": ws.user_id,
                 "kind": ws.kind,
+                "pending_approval": pending_approval,
+                "pending_approval_detail": pending_approval_detail,
             }
         )
 
